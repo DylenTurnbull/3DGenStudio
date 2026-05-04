@@ -19,6 +19,13 @@ const STATUS_MAP = {
 
 const CHANGE_LOG_ENTRIES = [
   {
+    version: 'v0.6.0',
+    date: '2026-05-04',
+    items: [
+      'New Image Editor',
+    ],
+  },
+  {
     version: 'v0.5.0',
     date: '2026-05-03',
     items: [
