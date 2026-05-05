@@ -1707,17 +1707,36 @@ function createTencentCloudClient({ secretId, secretKey, region }) {
 
   const tencentcloud = tencentcloudSdk?.default || tencentcloudSdk;
   const { Credential, ClientProfile, HttpProfile, CommonClient } = tencentcloud.common;
+  const HunyuanClient = tencentcloud?.hunyuan?.v20230901?.Client;
   const credential = new Credential(secretId, secretKey);
   const httpProfile = new HttpProfile();
   httpProfile.endpoint = TENCENT_HUNYUAN_ENDPOINT;
   const clientProfile = new ClientProfile();
   clientProfile.httpProfile = httpProfile;
+  // Large payload requests (for example ImageBase64) must use the TC3 signature flow.
+  clientProfile.signMethod = 'TC3-HMAC-SHA256';
+
+  if (typeof HunyuanClient === 'function') {
+    return new HunyuanClient(credential, region, clientProfile);
+  }
 
   return new CommonClient(TENCENT_HUNYUAN_ENDPOINT, TENCENT_HUNYUAN_VERSION, credential, region, clientProfile);
 }
 
 async function requestTencentCloud(client, action, params) {
   return await new Promise((resolve, reject) => {
+    if (typeof client?.[action] === 'function') {
+      client[action](params, (err, response) => {
+        if (err) {
+          reject(err);
+          return;
+        }
+
+        resolve(response || {});
+      });
+      return;
+    }
+
     client.request(action, params, (err, response) => {
       if (err) {
         reject(err);
@@ -1835,34 +1854,49 @@ async function queryTencentCloudMeshGenerationJob(settings, { region, jobId } = 
   };
 }
 
-async function downloadTencentCloudResultFiles(resultFiles = []) {
-  const downloadedFiles = [];
-
-  for (const [index, resultFile] of resultFiles.entries()) {
-    if (!resultFile?.Url) {
-      continue;
-    }
-
-    const response = await fetch(resultFile.Url);
-    if (!response.ok) {
-      throw new Error(`Failed to download Tencent Cloud mesh result (${response.status})`);
-    }
-
-    const contentType = response.headers.get('content-type') || 'application/octet-stream';
-    const buffer = Buffer.from(await response.arrayBuffer());
-    const extension = path.extname(getFilenameFromUrl(resultFile.Url, '')).replace('.', '') || getExtensionFromContentType(contentType, 'glb');
-    const filename = getFilenameFromUrl(resultFile.Url, `generated_mesh_${index + 1}.${extension}`);
-
-    downloadedFiles.push({
-      buffer,
-      contentType,
-      filename,
-      previewImageUrl: resultFile.PreviewImageUrl || '',
-      resultType: resultFile.Type || ''
-    });
+function selectTencentPreferredResultFile(resultFiles = []) {
+  const normalizedFiles = Array.isArray(resultFiles) ? resultFiles.filter(Boolean) : [];
+  if (normalizedFiles.length === 0) {
+    return null;
   }
 
-  return downloadedFiles;
+  const glbFile = normalizedFiles.find((entry) => String(entry?.Type || '').toUpperCase() === 'GLB');
+  if (glbFile?.Url) {
+    return glbFile;
+  }
+
+  const objFile = normalizedFiles.find((entry) => String(entry?.Type || '').toUpperCase() === 'OBJ');
+  if (objFile?.Url) {
+    return objFile;
+  }
+
+  const firstFileWithUrl = normalizedFiles.find((entry) => entry?.Url);
+  return firstFileWithUrl || normalizedFiles[0];
+}
+
+async function downloadTencentCloudResultFiles(resultFiles = []) {
+  const resultFile = selectTencentPreferredResultFile(resultFiles);
+  if (!resultFile?.Url) {
+    return [];
+  }
+
+  const response = await fetch(resultFile.Url);
+  if (!response.ok) {
+    throw new Error(`Failed to download Tencent Cloud mesh result (${response.status})`);
+  }
+
+  const contentType = response.headers.get('content-type') || 'application/octet-stream';
+  const buffer = Buffer.from(await response.arrayBuffer());
+  const extension = path.extname(getFilenameFromUrl(resultFile.Url, '')).replace('.', '') || getExtensionFromContentType(contentType, 'glb');
+  const filename = getFilenameFromUrl(resultFile.Url, `generated_mesh.${extension}`);
+
+  return [{
+    buffer,
+    contentType,
+    filename,
+    previewImageUrl: resultFile.PreviewImageUrl || '',
+    resultType: resultFile.Type || ''
+  }];
 }
 
 async function saveGeneratedMeshAssets({
