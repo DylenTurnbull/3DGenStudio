@@ -4361,10 +4361,20 @@ export default function MeshEditorPage() {
                 </div>
               ) : geometry ? (
                 <>
-                  <Canvas shadows={showShadows ? { type: THREE.PCFShadowMap } : false} resize={{ offsetSize: true }} style={{ width: '100%', height: '100%' }}>
+                  <Canvas shadows={showShadows ? { type: THREE.PCFSoftShadowMap } : false} resize={{ offsetSize: true }} style={{ width: '100%', height: '100%' }}>
                     <PerspectiveCamera makeDefault position={[3, 3, 5]} near={0.0001} far={4000} />
                     <ambientLight intensity={1.25} />
-                    <directionalLight position={[5, 7, 9]} intensity={2} castShadow={showShadows} />
+                    <directionalLight
+                      position={[5, 7, 9]}
+                      intensity={2}
+                      castShadow={showShadows}
+                      shadow-mapSize-width={2048}
+                      shadow-mapSize-height={2048}
+                      shadow-bias={-0.00015}
+                      shadow-normalBias={0.04}
+                      shadow-camera-near={0.5}
+                      shadow-camera-far={120}
+                    />
                     <directionalLight position={[-5, 3, -4]} intensity={0.6} color="#8ff5ff" />
                     {(activeMenu === 'texturing' || activeMenu === 'painting') && texturableMesh?.root && displayTextureRef.current && (activeMenu !== 'texturing' || (maskTextureRef.current && !texturingUnavailableReason)) ? (
                       <TexturedMesh

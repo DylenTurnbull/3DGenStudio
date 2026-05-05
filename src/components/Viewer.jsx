@@ -270,12 +270,22 @@ export default function Viewer({
     >
       <Canvas
         key={modelUrl || 'placeholder'}
-        shadows={showShadows ? { type: THREE.PCFShadowMap } : false}
+        shadows={showShadows ? { type: THREE.PCFSoftShadowMap } : false}
         resize={{ offsetSize: true }}
       >
         <PerspectiveCamera makeDefault position={[3, 3, 5]} />
           <ambientLight intensity={Math.max(lightIntensity * 0.55, 0.35)} />
-          <directionalLight position={[4, 6, 8]} intensity={lightIntensity} castShadow={showShadows} />
+          <directionalLight
+            position={[4, 6, 8]}
+            intensity={lightIntensity}
+            castShadow={showShadows}
+            shadow-mapSize-width={2048}
+            shadow-mapSize-height={2048}
+            shadow-bias={-0.00015}
+            shadow-normalBias={0.04}
+            shadow-camera-near={0.5}
+            shadow-camera-far={40}
+          />
           <directionalLight position={[-5, 3, -4]} intensity={Math.max(lightIntensity * 0.4, 0.15)} color="#8ff5ff" />
         <Suspense fallback={null}>
           {renderedModel ? <primitive object={renderedModel} /> : <PlaceholderMesh />}
