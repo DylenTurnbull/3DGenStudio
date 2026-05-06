@@ -144,6 +144,34 @@ function getDefaultNodeOutputValue(nodeTypeName = '') {
   return ''
 }
 
+function getDefaultTargetInputId(nodeTypeName = '') {
+  const nodeKind = getNodeKind(nodeTypeName)
+
+  if (nodeKind === 'imageCompare') {
+    return IMAGE_COMPARE_INPUT_IDS[0]
+  }
+
+  if (isValueNodeKind(nodeKind)) {
+    return null
+  }
+
+  return DEFAULT_INPUT_ID
+}
+
+function canNodeTypeAcceptIncomingConnection(nodeTypeName = '', outputType = null) {
+  const targetInputId = getDefaultTargetInputId(nodeTypeName)
+
+  if (!targetInputId) {
+    return false
+  }
+
+  if (getNodeKind(nodeTypeName) === 'imageCompare') {
+    return normalizeConnectorType(outputType) === 'image'
+  }
+
+  return true
+}
+
 function isValueNodeKind(nodeKind = '') {
   return ['number', 'text', 'boolean'].includes(String(nodeKind || '').trim().toLowerCase())
 }
@@ -358,6 +386,19 @@ function buildImageEditorPath({ asset, projectId, nodeId, returnTo }) {
 
 function buildEdgeId(connection) {
   return `edge:${connection.sourceNodeId}:${connection.outputId}:${connection.targetNodeId}:${connection.inputId}`
+}
+
+function getPointerClientPosition(event) {
+  if ('clientX' in event && 'clientY' in event) {
+    return { x: event.clientX, y: event.clientY }
+  }
+
+  const touch = event.changedTouches?.[0] || event.touches?.[0]
+  if (touch) {
+    return { x: touch.clientX, y: touch.clientY }
+  }
+
+  return null
 }
 
 function toFlowEdge(connection) {
@@ -2103,6 +2144,8 @@ export default function GraphPage({ project }) {
 
   const fileInputRef = useRef(null)
   const pendingUploadNodeIdRef = useRef(null)
+  const pendingConnectionRef = useRef(null)
+  const skipNextPaneClickRef = useRef(false)
   const progressSubscriptionsRef = useRef(new Map())
   const libraryLoadedRef = useRef(false)
   const workflowsLoadedRef = useRef(false)
@@ -2579,34 +2622,105 @@ export default function GraphPage({ project }) {
     return createdNode
   }, [createProjectNode, handleDeleteNode, nodes.length, project.id, setNodes])
 
-  const handlePaneContextMenu = useCallback((event) => {
-    event.preventDefault()
-
+  const openNodePickerAt = useCallback((clientX, clientY, pendingConnection = null) => {
     const canvasBounds = graphCanvasRef.current?.getBoundingClientRect()
     const flowPosition = reactFlowInstance?.screenToFlowPosition
-      ? reactFlowInstance.screenToFlowPosition({ x: event.clientX, y: event.clientY })
+      ? reactFlowInstance.screenToFlowPosition({ x: clientX, y: clientY })
       : { x: 96, y: 96 }
 
     setNodePicker({
-      menuX: canvasBounds ? event.clientX - canvasBounds.left : event.clientX,
-      menuY: canvasBounds ? event.clientY - canvasBounds.top : event.clientY,
+      menuX: canvasBounds ? clientX - canvasBounds.left : clientX,
+      menuY: canvasBounds ? clientY - canvasBounds.top : clientY,
       flowX: flowPosition.x,
-      flowY: flowPosition.y
+      flowY: flowPosition.y,
+      pendingConnection
     })
   }, [reactFlowInstance])
+
+  const handlePaneContextMenu = useCallback((event) => {
+    event.preventDefault()
+    openNodePickerAt(event.clientX, event.clientY)
+  }, [openNodePickerAt])
 
   const handleCreateNodeFromPicker = useCallback(async (nodeTypeName) => {
     if (!nodePicker) {
       return
     }
 
-    await handleCreateNode(nodeTypeName, {
+    const createdNode = await handleCreateNode(nodeTypeName, {
       xPos: nodePicker.flowX,
       yPos: nodePicker.flowY
     })
 
+    if (nodePicker.pendingConnection && canNodeTypeAcceptIncomingConnection(nodeTypeName, nodePicker.pendingConnection.outputType)) {
+      try {
+        const createdConnection = await createProjectConnection(project.id, {
+          sourceNodeId: Number(nodePicker.pendingConnection.sourceNodeId),
+          targetNodeId: Number(createdNode.id),
+          inputId: getDefaultTargetInputId(nodeTypeName),
+          outputId: nodePicker.pendingConnection.outputId || DEFAULT_OUTPUT_ID
+        })
+
+        setEdges(currentEdges => {
+          const nextEdge = toFlowEdge(createdConnection)
+          if (currentEdges.some(edge => edge.id === nextEdge.id)) {
+            return currentEdges
+          }
+
+          return addEdge(nextEdge, currentEdges)
+        })
+      } catch (err) {
+        console.error('Failed to connect newly created graph node:', err)
+      }
+    }
+
     setNodePicker(null)
-  }, [handleCreateNode, nodePicker])
+  }, [createProjectConnection, handleCreateNode, nodePicker, project.id, setEdges])
+
+  const handleConnectStart = useCallback((_event, params) => {
+    if (params?.handleType !== 'source' || !params?.nodeId) {
+      pendingConnectionRef.current = null
+      return
+    }
+
+    const sourceNode = nodes.find(node => node.id === String(params.nodeId))
+    pendingConnectionRef.current = {
+      sourceNodeId: String(params.nodeId),
+      outputId: params.handleId || DEFAULT_OUTPUT_ID,
+      outputType: getNodeOutputType(sourceNode)
+    }
+  }, [nodes])
+
+  const handleConnectEnd = useCallback((event, connectionState) => {
+    const pendingConnection = pendingConnectionRef.current
+    pendingConnectionRef.current = null
+
+    if (!pendingConnection || connectionState?.isValid) {
+      return
+    }
+
+    const pointerPosition = getPointerClientPosition(event)
+    if (!pointerPosition) {
+      return
+    }
+
+    const canvasBounds = graphCanvasRef.current?.getBoundingClientRect()
+    if (canvasBounds) {
+      const droppedInsideCanvas = (
+        pointerPosition.x >= canvasBounds.left
+        && pointerPosition.x <= canvasBounds.right
+        && pointerPosition.y >= canvasBounds.top
+        && pointerPosition.y <= canvasBounds.bottom
+      )
+
+      if (!droppedInsideCanvas) {
+        return
+      }
+    }
+
+    skipNextPaneClickRef.current = true
+    openNodePickerAt(pointerPosition.x, pointerPosition.y, pendingConnection)
+  }, [openNodePickerAt])
 
   const openActionDraft = useCallback((nodeId, nodeKind) => {
     const inputSources = buildNodeInputSources(nodeId, nodes, edges)
@@ -4087,6 +4201,11 @@ export default function GraphPage({ project }) {
   }, [edges, nodes])
 
   const handlePaneClick = useCallback(() => {
+    if (skipNextPaneClickRef.current) {
+      skipNextPaneClickRef.current = false
+      return
+    }
+
     if (nodePicker) {
       setNodePicker(null)
     }
@@ -4303,12 +4422,18 @@ export default function GraphPage({ project }) {
               >
                 <div className="graph-page__node-picker-title font-label">ADD NODE</div>
                 <div className="graph-page__node-picker-options">
-                  {GRAPH_NODE_TYPE_OPTIONS.map(nodeTypeName => (
+                  {GRAPH_NODE_TYPE_OPTIONS
+                    .filter(nodeTypeName => !nodePicker.pendingConnection || getDefaultTargetInputId(nodeTypeName))
+                    .map(nodeTypeName => (
                     <button
                       key={nodeTypeName}
                       type="button"
                       className="graph-page__node-picker-option"
+                      disabled={Boolean(nodePicker.pendingConnection) && !canNodeTypeAcceptIncomingConnection(nodeTypeName, nodePicker.pendingConnection.outputType)}
                       onClick={() => handleCreateNodeFromPicker(nodeTypeName)}
+                      title={nodePicker.pendingConnection && !canNodeTypeAcceptIncomingConnection(nodeTypeName, nodePicker.pendingConnection.outputType)
+                        ? 'This node cannot accept the dragged connection'
+                        : undefined}
                     >
                       {nodeTypeName}
                     </button>
@@ -4327,7 +4452,9 @@ export default function GraphPage({ project }) {
               onInit={setReactFlowInstance}
               onNodesChange={onNodesChange}
               onEdgesChange={onEdgesChange}
+              onConnectStart={handleConnectStart}
               onConnect={handleConnect}
+              onConnectEnd={handleConnectEnd}
               isValidConnection={isValidConnection}
               onPaneClick={handlePaneClick}
               onPaneContextMenu={handlePaneContextMenu}
