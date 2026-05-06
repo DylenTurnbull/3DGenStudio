@@ -1221,7 +1221,7 @@ export default function ImageEditorPage() {
             if (!config.asset) {
               throw new Error(`Select an asset for image parameter "${parameter.name}".`)
             }
-            // eslint-disable-next-line no-await-in-loop
+             
             inputs[parameter.id] = await loadAssetAsFile(config.asset)
             continue
           }

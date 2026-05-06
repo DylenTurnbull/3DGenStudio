@@ -415,7 +415,7 @@ function CameraRig({ geometry, frameKey, onCameraReady, controlsEnabled = true }
     setDistanceBounds({ minDistance, maxDistance })
 
     camera.position.set(center.x + distance, center.y + distance * 0.65, center.z + distance)
-    // eslint-disable-next-line react-hooks/immutability
+     
     Object.assign(camera, {
       near: Math.max(radius * 0.00005, 0.0001),
       far: Math.max(radius * 80, 4000)
@@ -3275,7 +3275,7 @@ export default function MeshEditorPage() {
           for (const layer of paintLayers) {
             const layerCanvas = paintLayerCanvasesRef.current.get(layer.id)
             if (!layerCanvas) continue
-            // eslint-disable-next-line no-await-in-loop
+             
             layerFiles[layer.id] = await canvasToPngFile(layerCanvas, `${layer.id}.png`)
           }
 
