@@ -1,4 +1,4 @@
 {
-	"version": "0.7.0",
+	"version": "0.7.1",
 	"message": "New dependencies have been added. Don't forget to run: npm install"
 }

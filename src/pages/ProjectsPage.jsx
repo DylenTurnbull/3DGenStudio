@@ -19,8 +19,20 @@ const STATUS_MAP = {
 
 const CHANGE_LOG_ENTRIES = [
   {
+    version: 'v0.7.1',
+    date: '2026-05-07',
+    items: [
+      'Image Editor: Added an experimental Shadow Remover',
+			'Image Editor: Can draw and erase the Base Layer',
+			'Image Editor: Improved Crop UI',
+			'Graph Page: Can drag output connector to the workflow to display the list of nodes',			
+			'Notifications: Display errors in notifications panel',
+			'Fixed: Imported images in DB'
+    ],
+  },
+  {
     version: 'v0.7.0',
-    date: '2026-05-04',
+    date: '2026-05-05',
     items: [
       'Can generate Mesh using Tencent Cloud and Tripo AI',
 			'Image Editor : Added Zoom-In/Out feature'
