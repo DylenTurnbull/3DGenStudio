@@ -700,39 +700,37 @@ function createTexturedRenderClone(root, textureKey, displayTexture) {
       return
     }
 
-    child.castShadow = true
-    child.receiveShadow = true
+    child.castShadow = false
+    child.receiveShadow = false
 
+    // Use MeshBasicMaterial (unlit) so the captured image contains raw texture
+    // albedo colors rather than lit/shaded colors. This prevents double-lighting:
+    // the projected result is stored as albedo, and Three.js applies its own
+    // lighting pipeline on display.
     if (Array.isArray(child.material)) {
       child.material = child.material.map(material => {
-        const nextMaterial = material?.clone?.() || material
-
-        if (nextMaterial && getTextureKeyFromMaterial(material) === textureKey) {
-          nextMaterial.map = displayTexture
-          nextMaterial.needsUpdate = true
-        }
-
-        if (nextMaterial) {
-          materials.push(nextMaterial)
-        }
-
+        const usesThisTexture = getTextureKeyFromMaterial(material) === textureKey
+        const nextMaterial = new THREE.MeshBasicMaterial({
+          map: usesThisTexture ? displayTexture : (material?.map ?? null),
+          side: material?.side ?? THREE.FrontSide,
+          transparent: material?.transparent ?? false,
+          alphaTest: material?.alphaTest ?? 0
+        })
+        materials.push(nextMaterial)
         return nextMaterial
       })
       return
     }
 
-    const nextMaterial = child.material?.clone?.() || child.material
-
-    if (nextMaterial && getTextureKeyFromMaterial(child.material) === textureKey) {
-      nextMaterial.map = displayTexture
-      nextMaterial.needsUpdate = true
-    }
-
+    const usesThisTexture = getTextureKeyFromMaterial(child.material) === textureKey
+    const nextMaterial = new THREE.MeshBasicMaterial({
+      map: usesThisTexture ? displayTexture : (child.material?.map ?? null),
+      side: child.material?.side ?? THREE.FrontSide,
+      transparent: child.material?.transparent ?? false,
+      alphaTest: child.material?.alphaTest ?? 0
+    })
     child.material = nextMaterial
-
-    if (nextMaterial) {
-      materials.push(nextMaterial)
-    }
+    materials.push(nextMaterial)
   })
 
   return {
@@ -808,8 +806,13 @@ export function captureTexturedMeshView({ root, textureKey, displayTexture, came
   try {
     renderer.setPixelRatio(1)
     // Render Three.js natively at the high-res dimensions
-    renderer.setSize(renderWidth, renderHeight, false) 
+    renderer.setSize(renderWidth, renderHeight, false)
     renderer.outputColorSpace = displayTexture.colorSpace || THREE.SRGBColorSpace
+    // No tone mapping: the materials are MeshBasicMaterial (unlit) so the output
+    // is the raw texture albedo. ComfyUI will inpaint those albedo colors and the
+    // result will be stored back as albedo — preventing double-lighting when
+    // Three.js applies its own lighting + ACESFilmic tone mapping on display.
+    renderer.toneMapping = THREE.NoToneMapping
     renderer.render(scene, projectionCamera)
 
     // Draw 1:1 mapping (no stretching, perfect pixel quality)
