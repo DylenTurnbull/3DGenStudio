@@ -2571,6 +2571,12 @@ export default function MeshEditorPage() {
 
   const booleanResultPreviewGeometry = useMemo(() => {
     if (!geometry || !booleanStampLocalGeometry || !booleanStampMatrix) {
+          // While the user is positioning the stamp, skip the expensive CPU deformation
+          // and rely on the cheap ghost overlay mesh. The full deform only runs once the
+          // stamp is locked (booleanPlaceMode === false).
+          if (booleanPlaceMode) {
+            return null
+          }
       return null
     }
 
@@ -2584,7 +2590,7 @@ export default function MeshEditorPage() {
     } catch {
       return null
     }
-  }, [booleanOperation, booleanStampDepth, booleanStampLocalGeometry, booleanStampMatrix, booleanStampSize, geometry])
+  }, [booleanOperation, booleanPlaceMode, booleanStampDepth, booleanStampLocalGeometry, booleanStampMatrix, booleanStampSize, geometry])
 
   useEffect(() => () => booleanStampLocalGeometry?.dispose?.(), [booleanStampLocalGeometry])
   useEffect(() => () => booleanResultPreviewGeometry?.dispose?.(), [booleanResultPreviewGeometry])
@@ -2865,7 +2871,7 @@ export default function MeshEditorPage() {
       setBooleanStampNudgeX(0)
       setBooleanStampNudgeY(0)
       setBooleanPlaceMode(false)
-      setFeedback('Boolean stamp locked. Adjust size/depth/rotation/offset, or click Place stamp again to reposition.')
+      setFeedback('Boolean stamp locked. Adjust parameters, or click on the mesh to reposition.')
       return
     }
 
@@ -3127,7 +3133,7 @@ export default function MeshEditorPage() {
     }
 
     canvasShellRef.current?.setPointerCapture?.(event.pointerId)
-  }, [activeMenu, applySculptStamp, beginPaintStroke, booleanPlaceMode, brushSize, computeSculptCursorPixelRadius, ensureSculptMesh, getMeshIntersection, getPointerPosition, numericAssetId, paintBrushSize, paintColor, paintFlow, paintHardness, paintLayers, paintMode, paintRotation, pendingPatch, pushSculptUndo, resetSelection, sculptBrush, sculptFrontFacesOnly, sculptHardness, sculptSize, sculptStampRotation, sculptSymmetry, selectedLayerId, selectionMesh, stampBrushAtUv, syncProjectionMaskCanvasSize, texturableMesh, texturingReady])
+  }, [activeMenu, applySculptStamp, beginPaintStroke, booleanPlaceMode, booleanStampBasis, brushSize, computeSculptCursorPixelRadius, ensureSculptMesh, getMeshIntersection, getPointerPosition, numericAssetId, paintBrushSize, paintColor, paintFlow, paintHardness, paintLayers, paintMode, paintRotation, pendingPatch, pushSculptUndo, resetSelection, sculptBrush, sculptFrontFacesOnly, sculptHardness, sculptSize, sculptStampRotation, sculptSymmetry, selectedLayerId, selectionMesh, stampBrushAtUv, syncProjectionMaskCanvasSize, texturableMesh, texturingReady])
 
   const handleCanvasPointerMove = useCallback((event) => {
     if (activeMenu === 'boolean' && booleanPlaceMode) {
@@ -3157,6 +3163,27 @@ export default function MeshEditorPage() {
       }
 
       setBooleanStampBasis(basis)
+      return
+    }
+
+
+    if (activeMenu === 'boolean' && !booleanPlaceMode && booleanStampBasis) {
+      // Stamp is locked — clicking on the mesh re-enters placement mode so the
+      // user can reposition it, then click again to lock.
+      if (selectionMesh && booleanBrushMaskRef.current) {
+        const intersection = getMeshIntersection(nextPoint, selectionMesh)
+        if (intersection?.point && intersection?.face) {
+          const basis = computeBooleanStampBasis(intersection, cameraRef.current)
+          if (basis) {
+            setBooleanStampBasis(basis)
+            setBooleanStampNudgeX(0)
+            setBooleanStampNudgeY(0)
+          }
+        }
+      }
+      event.preventDefault()
+      setBooleanPlaceMode(true)
+      setFeedback('Move pointer on mesh to reposition stamp, then click to lock.')
       return
     }
 
@@ -4622,7 +4649,7 @@ export default function MeshEditorPage() {
                     </div>
 
                     <div className="mesh-editor-panel__notes">
-                      <span className="mesh-editor-panel__hint">Pick a brush, click Place stamp, then move over the mesh to position it.</span>
+                      <span className="mesh-editor-panel__hint">Pick a brush, click Place stamp, move over mesh to position, then click to lock. Click the mesh again to reposition.</span>
                       <span className="mesh-editor-panel__hint">Use size/depth/rotation/offset and nudge sliders for final placement.</span>
                       <span className="mesh-editor-panel__hint">Click Apply Boolean to commit Union / Subtract / Intersect.</span>
                     </div>
