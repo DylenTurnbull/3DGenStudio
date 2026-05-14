@@ -406,7 +406,7 @@ function deformGeometryWithBooleanStamp(baseGeometry, mask, stampMatrix, {
       continue
     }
 
-    const zFalloff = Math.max(0, 1 - sideDistance / (maxDepth * 1.5))
+    const zFalloff = Math.max(0, 1 - sideDistance / (maxDepth * 2.0))
     if (zFalloff <= 0) {
       continue
     }
@@ -428,6 +428,7 @@ function deformGeometryWithBooleanStamp(baseGeometry, mask, stampMatrix, {
   }
 
   positionAttr.needsUpdate = true
+	result.deleteAttribute('normal')
   result.computeVertexNormals()
   result.computeBoundingBox()
   result.computeBoundingSphere()
@@ -477,7 +478,7 @@ function collectBooleanDeformationFaceIndices(baseGeometry, mask, stampMatrix, {
     }
 
     const sideDistance = localPoint.z * hitSide
-    return sideDistance >= 0 && sideDistance <= maxDepth * 1.75
+    return sideDistance >= 0 && sideDistance < maxDepth * 1.5
   }
 
   const faceCount = indexAttr
@@ -523,7 +524,7 @@ function collectBooleanDeformationFaceIndices(baseGeometry, mask, stampMatrix, {
     }
 
     const sideDistance = localPoint.z * hitSide
-    if (sideDistance >= 0 && sideDistance <= maxDepth * 1.75) {
+    if (sideDistance >= 0 && sideDistance < maxDepth * 1.5) {
       touchedFaceIndices.push(faceIndex)
     }
   }
@@ -538,7 +539,7 @@ function tessellateBooleanDeformationRegion(baseGeometry, mask, stampMatrix, {
   threshold = 24,
   levels = 0
 } = {}) {
-  const passes = Math.max(0, Math.min(4, Math.floor(levels)))
+  const passes = Math.max(0, Math.min(2, Math.floor(levels)))
   if (passes <= 0) {
     return baseGeometry
   }
@@ -1030,7 +1031,7 @@ function BooleanPreviewMesh({
                 if (alpha >= uThreshold) {
                   float sideDistance = localPoint.z * uHitSide;
                   if (sideDistance >= 0.0) {
-                    float zFalloff = max(0.0, 1.0 - sideDistance / (uDepth * 1.5));
+                    float zFalloff = max(0.0, 1.0 - sideDistance / (uDepth * 2.0));
                     float edgeU = min(u, 1.0 - u);
                     float edgeV = min(v, 1.0 - v);
                     float edgeSoftness = clamp(uThreshold, 0.02, 0.22);
@@ -4051,6 +4052,7 @@ export default function MeshEditorPage() {
             size: booleanStampSize,
             depth: booleanStampDepth,
             offset: booleanStampOffset,
+            threshold: 1,
             levels: tessellationPasses
           }
         )
@@ -4064,7 +4066,8 @@ export default function MeshEditorPage() {
           operation: booleanOperation,
           size: booleanStampSize,
           depth: booleanStampDepth,
-          offset: booleanStampOffset
+          offset: booleanStampOffset,
+          threshold: 1
         }
       )
 

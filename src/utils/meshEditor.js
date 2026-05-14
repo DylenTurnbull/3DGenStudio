@@ -1039,32 +1039,106 @@ export function subdivideSelectedFaces(geometry, selectedFaceIndices = []) {
   const meshData = geometryToMeshData(geometry)
   const nextPositions = [...meshData.positions]
   const nextIndices = []
+
   const selectedFaces = new Set(selectedFaceIndices)
   const midpointCache = new Map()
 
-  const getMidpointIndex = (left, right) => {
-    const key = left < right ? `${left}:${right}` : `${right}:${left}`
-    if (midpointCache.has(key)) {
-      return midpointCache.get(key)
+  // ------------------------------------------------------------
+  // Build edge -> faces map
+  // ------------------------------------------------------------
+
+  const edgeFaces = new Map()
+
+  const addEdgeFace = (a, b, faceIndex) => {
+    const key = a < b ? `${a}:${b}` : `${b}:${a}`
+
+    if (!edgeFaces.has(key)) {
+      edgeFaces.set(key, [])
     }
 
-    const midpointIndex = nextPositions.length / 3
-    nextPositions.push(
-      (meshData.positions[left * 3] + meshData.positions[right * 3]) / 2,
-      (meshData.positions[left * 3 + 1] + meshData.positions[right * 3 + 1]) / 2,
-      (meshData.positions[left * 3 + 2] + meshData.positions[right * 3 + 2]) / 2
-    )
-    midpointCache.set(key, midpointIndex)
-    return midpointIndex
+    edgeFaces.get(key).push(faceIndex)
   }
 
   for (let faceIndex = 0; faceIndex < meshData.indices.length / 3; faceIndex += 1) {
     const [a, b, c] = getFace(meshData, faceIndex)
 
-    if (!selectedFaces.has(faceIndex)) {
-      nextIndices.push(a, b, c)
+    addEdgeFace(a, b, faceIndex)
+    addEdgeFace(b, c, faceIndex)
+    addEdgeFace(c, a, faceIndex)
+  }
+
+  // ------------------------------------------------------------
+  // Expand selection so neighbor faces sharing subdivided edges
+  // are also tessellated.
+  // ------------------------------------------------------------
+
+  const expandedFaces = new Set(selectedFaces)
+
+  selectedFaces.forEach(faceIndex => {
+    const [a, b, c] = getFace(meshData, faceIndex)
+
+    const edges = [
+      [a, b],
+      [b, c],
+      [c, a]
+    ]
+
+    edges.forEach(([v0, v1]) => {
+      const key = v0 < v1 ? `${v0}:${v1}` : `${v1}:${v0}`
+
+      const neighbors = edgeFaces.get(key) || []
+
+      neighbors.forEach(neighborFace => {
+        expandedFaces.add(neighborFace)
+      })
+    })
+  })
+
+  // ------------------------------------------------------------
+  // Shared midpoint creation
+  // ------------------------------------------------------------
+
+  const getMidpointIndex = (left, right) => {
+    const key = left < right ? `${left}:${right}` : `${right}:${left}`
+
+    if (midpointCache.has(key)) {
+      return midpointCache.get(key)
+    }
+
+    const midpointIndex = nextPositions.length / 3
+
+    nextPositions.push(
+      (meshData.positions[left * 3] + meshData.positions[right * 3]) / 2,
+      (meshData.positions[left * 3 + 1] + meshData.positions[right * 3 + 1]) / 2,
+      (meshData.positions[left * 3 + 2] + meshData.positions[right * 3 + 2]) / 2
+    )
+
+    midpointCache.set(key, midpointIndex)
+    return midpointIndex
+  }
+
+  // ------------------------------------------------------------
+  // Subdivide — two passes to prevent T-junctions at the boundary
+  // of the expanded region.
+  //
+  // Pass 1: fully subdivide every expanded face (4 sub-triangles).
+  //         This populates midpointCache for ALL edges of those faces,
+  //         including their outer edges that touch non-expanded faces.
+  //
+  // Pass 2: for each non-expanded face, check whether any of its edges
+  //         already have a midpoint in the cache (meaning its neighbour
+  //         was subdivided in pass 1).  If so, stitch that edge so the
+  //         face shares the midpoint vertex instead of leaving a
+  //         T-junction that becomes a visible hole after deformation.
+  // ------------------------------------------------------------
+
+  // Pass 1 — expanded faces
+  for (let faceIndex = 0; faceIndex < meshData.indices.length / 3; faceIndex += 1) {
+    if (!expandedFaces.has(faceIndex)) {
       continue
     }
+
+    const [a, b, c] = getFace(meshData, faceIndex)
 
     const ab = getMidpointIndex(a, b)
     const bc = getMidpointIndex(b, c)
@@ -1078,8 +1152,72 @@ export function subdivideSelectedFaces(geometry, selectedFaceIndices = []) {
     )
   }
 
-  return createIndexedGeometry(nextPositions, nextIndices)
+  // Pass 2 — non-expanded faces: stitch any edges that border a subdivision
+  for (let faceIndex = 0; faceIndex < meshData.indices.length / 3; faceIndex += 1) {
+    if (expandedFaces.has(faceIndex)) {
+      continue
+    }
+
+    const [a, b, c] = getFace(meshData, faceIndex)
+
+    const keyAB = a < b ? `${a}:${b}` : `${b}:${a}`
+    const keyBC = b < c ? `${b}:${c}` : `${c}:${b}`
+    const keyCA = c < a ? `${c}:${a}` : `${a}:${c}`
+
+    const mAB = midpointCache.get(keyAB)
+    const mBC = midpointCache.get(keyBC)
+    const mCA = midpointCache.get(keyCA)
+
+    const hasAB = mAB !== undefined
+    const hasBC = mBC !== undefined
+    const hasCA = mCA !== undefined
+    const splitCount = (hasAB ? 1 : 0) + (hasBC ? 1 : 0) + (hasCA ? 1 : 0)
+
+    if (splitCount === 0) {
+      // No adjacent subdivisions — keep the triangle as-is
+      nextIndices.push(a, b, c)
+    } else if (splitCount === 1) {
+      // One split edge → 2 triangles (preserves winding order)
+      if (hasAB) {
+        nextIndices.push(a, mAB, c,  mAB, b, c)
+      } else if (hasBC) {
+        nextIndices.push(a, b, mBC,  a, mBC, c)
+      } else {
+        // hasCA: mCA is the midpoint of edge c→a
+        nextIndices.push(a, b, mCA,  b, c, mCA)
+      }
+    } else if (splitCount === 2) {
+      // Two split edges → 3 triangles; fan from the unsplit corner
+      if (!hasCA) {
+        // mAB and mBC present; free corner is c
+        nextIndices.push(c, a, mAB,  c, mAB, mBC,  mAB, b, mBC)
+      } else if (!hasAB) {
+        // mBC and mCA present; free corner is a
+        nextIndices.push(a, b, mBC,  a, mBC, mCA,  mBC, c, mCA)
+      } else {
+        // mCA and mAB present; free corner is b
+        nextIndices.push(b, c, mCA,  b, mCA, mAB,  mCA, a, mAB)
+      }
+    } else {
+      // All 3 edges split — full 4-way subdivision (rare at the outer boundary,
+      // but handle it correctly to avoid any degenerate geometry)
+      nextIndices.push(
+        a, mAB, mCA,
+        mAB, b, mBC,
+        mCA, mBC, c,
+        mAB, mBC, mCA
+      )
+    }
+  }
+
+  const compacted = compactMeshData({
+    positions: nextPositions,
+    indices: nextIndices
+  })
+
+  return createIndexedGeometry(compacted.positions, compacted.indices)
 }
+	
 
 export function fillHoleLoops(geometry, holeLoops = []) {
   if (!Array.isArray(holeLoops) || holeLoops.length === 0) {
