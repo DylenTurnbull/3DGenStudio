@@ -97,6 +97,336 @@ function loadImageElement(url) {
   })
 }
 
+function createBooleanBrushMaskFromImage(image, maxResolution = 96) {
+  if (!image) {
+    return null
+  }
+
+  const sourceW = Math.max(1, image.naturalWidth || image.width || 1)
+  const sourceH = Math.max(1, image.naturalHeight || image.height || 1)
+  const scale = Math.min(1, maxResolution / Math.max(sourceW, sourceH))
+  const width = Math.max(8, Math.round(sourceW * scale))
+  const height = Math.max(8, Math.round(sourceH * scale))
+
+  const canvas = document.createElement('canvas')
+  canvas.width = width
+  canvas.height = height
+  const ctx = canvas.getContext('2d', { willReadFrequently: true }) || canvas.getContext('2d')
+  ctx.clearRect(0, 0, width, height)
+  ctx.drawImage(image, 0, 0, width, height)
+
+  const pixels = ctx.getImageData(0, 0, width, height).data
+  const alpha = new Uint8Array(width * height)
+
+  let alphaCoverage = 0
+  for (let i = 0; i < pixels.length; i += 4) {
+    alphaCoverage += pixels[i + 3]
+  }
+
+  // If the source has no meaningful alpha channel, treat it like
+  // black-on-white stencil art (black = filled, white = empty).
+  const alphaIsMeaningful = alphaCoverage > width * height * 20
+  for (let p = 0; p < width * height; p += 1) {
+    const i = p * 4
+    const a = pixels[i + 3]
+    if (alphaIsMeaningful) {
+      alpha[p] = a
+      continue
+    }
+
+    const lum = 0.299 * pixels[i] + 0.587 * pixels[i + 1] + 0.114 * pixels[i + 2]
+    alpha[p] = Math.max(0, Math.min(255, Math.round(255 - lum)))
+  }
+
+  return { alpha, width, height }
+}
+
+function buildBooleanStampGeometry(mask, size = 0.2, depth = 0.06, threshold = 24) {
+  if (!mask?.alpha || !mask.width || !mask.height) {
+    return null
+  }
+
+  const { alpha, width, height } = mask
+  const occupied = new Uint8Array(width * height)
+  let occupiedCount = 0
+
+  for (let index = 0; index < occupied.length; index += 1) {
+    const filled = alpha[index] >= threshold ? 1 : 0
+    occupied[index] = filled
+    occupiedCount += filled
+  }
+
+  if (occupiedCount === 0) {
+    return null
+  }
+
+  const maxDim = Math.max(width, height)
+  const stampWidth = Math.max(1e-5, size * (width / maxDim))
+  const stampHeight = Math.max(1e-5, size * (height / maxDim))
+  const cellW = stampWidth / width
+  const cellH = stampHeight / height
+  const z0 = 0
+  const z1 = Math.max(1e-5, depth)
+  const positions = []
+
+  const isFilled = (x, y) => {
+    if (x < 0 || y < 0 || x >= width || y >= height) {
+      return false
+    }
+    return occupied[y * width + x] === 1
+  }
+
+  const pushTri = (a, b, c) => {
+    positions.push(
+      a[0], a[1], a[2],
+      b[0], b[1], b[2],
+      c[0], c[1], c[2]
+    )
+  }
+
+  const pushQuad = (a, b, c, d) => {
+    pushTri(a, b, c)
+    pushTri(a, c, d)
+  }
+
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      if (!isFilled(x, y)) {
+        continue
+      }
+
+      const x0 = -stampWidth / 2 + x * cellW
+      const x1 = x0 + cellW
+      const y0 = stampHeight / 2 - (y + 1) * cellH
+      const y1 = y0 + cellH
+
+      // Front (+Z)
+      pushQuad(
+        [x0, y0, z1],
+        [x1, y0, z1],
+        [x1, y1, z1],
+        [x0, y1, z1]
+      )
+      // Back (-Z)
+      pushQuad(
+        [x0, y1, z0],
+        [x1, y1, z0],
+        [x1, y0, z0],
+        [x0, y0, z0]
+      )
+
+      if (!isFilled(x - 1, y)) {
+        pushQuad(
+          [x0, y0, z0],
+          [x0, y1, z0],
+          [x0, y1, z1],
+          [x0, y0, z1]
+        )
+      }
+      if (!isFilled(x + 1, y)) {
+        pushQuad(
+          [x1, y1, z0],
+          [x1, y0, z0],
+          [x1, y0, z1],
+          [x1, y1, z1]
+        )
+      }
+      if (!isFilled(x, y - 1)) {
+        pushQuad(
+          [x1, y1, z0],
+          [x0, y1, z0],
+          [x0, y1, z1],
+          [x1, y1, z1]
+        )
+      }
+      if (!isFilled(x, y + 1)) {
+        pushQuad(
+          [x0, y0, z0],
+          [x1, y0, z0],
+          [x1, y0, z1],
+          [x0, y0, z1]
+        )
+      }
+    }
+  }
+
+  const geometry = new THREE.BufferGeometry()
+  geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3))
+  geometry.computeVertexNormals()
+  geometry.computeBoundingBox()
+  geometry.computeBoundingSphere()
+  return geometry
+}
+
+function computeBooleanStampBasis(intersection, camera) {
+  if (!intersection?.point || !intersection?.face?.normal || !intersection?.object) {
+    return null
+  }
+
+  const normal = intersection.face.normal.clone().transformDirection(intersection.object.matrixWorld).normalize()
+  if (normal.lengthSq() < 1e-10) {
+    return null
+  }
+
+  const cameraForward = new THREE.Vector3(0, 0, -1)
+  camera?.getWorldDirection?.(cameraForward)
+  let tangent = new THREE.Vector3().crossVectors(cameraForward, normal)
+  if (tangent.lengthSq() < 1e-8) {
+    const helper = Math.abs(normal.y) < 0.9
+      ? new THREE.Vector3(0, 1, 0)
+      : new THREE.Vector3(1, 0, 0)
+    tangent = new THREE.Vector3().crossVectors(helper, normal)
+  }
+  tangent.normalize()
+  const bitangent = new THREE.Vector3().crossVectors(normal, tangent).normalize()
+
+  return {
+    point: intersection.point.clone(),
+    normal,
+    tangent,
+    bitangent
+  }
+}
+
+function buildBooleanStampMatrix(basis, rotationDeg = 0, offset = 0, nudgeX = 0, nudgeY = 0) {
+  const matrix = new THREE.Matrix4()
+  if (!basis) {
+    return matrix
+  }
+
+  const angle = (rotationDeg * Math.PI) / 180
+  const cos = Math.cos(angle)
+  const sin = Math.sin(angle)
+  const xAxis = basis.tangent.clone().multiplyScalar(cos).addScaledVector(basis.bitangent, sin).normalize()
+  const yAxis = basis.bitangent.clone().multiplyScalar(cos).addScaledVector(basis.tangent, -sin).normalize()
+  const zAxis = basis.normal.clone().normalize()
+  const position = basis.point.clone()
+    .addScaledVector(zAxis, offset)
+    .addScaledVector(xAxis, nudgeX)
+    .addScaledVector(yAxis, nudgeY)
+
+  matrix.makeBasis(xAxis, yAxis, zAxis)
+  matrix.setPosition(position)
+  return matrix
+}
+
+function sampleBooleanMaskAlpha(mask, u, v) {
+  if (!mask?.alpha || !mask.width || !mask.height) {
+    return 0
+  }
+
+  if (!Number.isFinite(u) || !Number.isFinite(v) || u < 0 || u > 1 || v < 0 || v > 1) {
+    return 0
+  }
+
+  const { alpha, width, height } = mask
+  const x = u * (width - 1)
+  const y = v * (height - 1)
+  const x0 = Math.floor(x)
+  const y0 = Math.floor(y)
+  const x1 = Math.min(width - 1, x0 + 1)
+  const y1 = Math.min(height - 1, y0 + 1)
+  const tx = x - x0
+  const ty = y - y0
+
+  const a00 = alpha[y0 * width + x0]
+  const a10 = alpha[y0 * width + x1]
+  const a01 = alpha[y1 * width + x0]
+  const a11 = alpha[y1 * width + x1]
+  const top = a00 + (a10 - a00) * tx
+  const bottom = a01 + (a11 - a01) * tx
+  return top + (bottom - top) * ty
+}
+
+function deformGeometryWithBooleanStamp(baseGeometry, mask, stampMatrix, {
+  operation = 'union',
+  size = 0.2,
+  depth = 0.06,
+  threshold = 24
+} = {}) {
+  if (!baseGeometry?.attributes?.position || !mask || !stampMatrix) {
+    return null
+  }
+
+  const result = baseGeometry.clone()
+  const positionAttr = result.attributes.position
+  if (!positionAttr?.array) {
+    return null
+  }
+
+  const pos = positionAttr.array
+  const normalAttr = result.attributes.normal
+  const normals = normalAttr?.array || null
+  const vertexCount = positionAttr.count
+
+  const stampWidth = Math.max(1e-5, size * (mask.width / Math.max(mask.width, mask.height)))
+  const stampHeight = Math.max(1e-5, size * (mask.height / Math.max(mask.width, mask.height)))
+  const halfW = stampWidth * 0.5
+  const halfH = stampHeight * 0.5
+  const maxDepth = Math.max(1e-5, depth)
+
+  const invStamp = stampMatrix.clone().invert()
+  const stampZ = new THREE.Vector3().setFromMatrixColumn(stampMatrix, 2).normalize()
+  const worldPoint = new THREE.Vector3()
+  const localPoint = new THREE.Vector3()
+  const displacement = new THREE.Vector3()
+
+  let sign = 1
+  const op = String(operation || 'union').toLowerCase()
+  if (op === 'subtract' || op === 'substract' || op === 'difference') {
+    sign = -1
+  } else if (op === 'intersect' || op === 'intersection') {
+    // Intersect behaves as a flatten-carve toward the stamp plane.
+    sign = -1
+  }
+
+  for (let i = 0; i < vertexCount; i += 1) {
+    const offset = i * 3
+    worldPoint.set(pos[offset], pos[offset + 1], pos[offset + 2])
+    localPoint.copy(worldPoint).applyMatrix4(invStamp)
+
+    const u = (localPoint.x + halfW) / stampWidth
+    const v = (halfH - localPoint.y) / stampHeight
+    if (u < 0 || u > 1 || v < 0 || v > 1) {
+      continue
+    }
+
+    const alpha = sampleBooleanMaskAlpha(mask, u, v)
+    if (alpha < threshold) {
+      continue
+    }
+
+    const alphaWeight = alpha / 255
+    // Keep deformation localized around the hit plane, but allow some thickness.
+    const zDistance = Math.abs(localPoint.z)
+    const zFalloff = Math.max(0, 1 - zDistance / (maxDepth * 1.5))
+    if (zFalloff <= 0) {
+      continue
+    }
+
+    const edgeU = Math.min(u, 1 - u)
+    const edgeV = Math.min(v, 1 - v)
+    const edgeSoftness = Math.max(0.02, Math.min(0.22, threshold / 255))
+    const edgeWeight = Math.min(1, Math.min(edgeU, edgeV) / edgeSoftness)
+    const strength = maxDepth * alphaWeight * zFalloff * edgeWeight
+
+    if (strength <= 1e-7) {
+      continue
+    }
+
+    displacement.copy(stampZ).multiplyScalar(sign * strength)
+    pos[offset] += displacement.x
+    pos[offset + 1] += displacement.y
+    pos[offset + 2] += displacement.z
+  }
+
+  positionAttr.needsUpdate = true
+  result.computeVertexNormals()
+  result.computeBoundingBox()
+  result.computeBoundingSphere()
+  return result
+}
+
 /**
  * Convert a screen-space brush radius (pixels) into the equivalent radius in
  * texture-canvas pixels, taking into account:
@@ -632,6 +962,23 @@ export default function MeshEditorPage() {
   const [modelingCanRedo, setModelingCanRedo] = useState(false)
   const modelingUndoStackRef = useRef([])
   const modelingRedoStackRef = useRef([])
+  const [booleanOperation, setBooleanOperation] = useState('union')
+  const [booleanPlaceMode, setBooleanPlaceMode] = useState(false)
+  const [booleanBrushSource, setBooleanBrushSource] = useState('asset')
+  const [booleanBrushAsset, setBooleanBrushAsset] = useState(null)
+  const [booleanBrushFile, setBooleanBrushFile] = useState(null)
+  const [showBooleanBrushSelector, setShowBooleanBrushSelector] = useState(false)
+  const booleanBrushFileInputRef = useRef(null)
+  const booleanBrushMaskRef = useRef(null)
+  const [booleanBrushRevision, setBooleanBrushRevision] = useState(0)
+  const [booleanStampBasis, setBooleanStampBasis] = useState(null)
+  const [booleanStampSize, setBooleanStampSize] = useState(0.2)
+  const [booleanStampDepth, setBooleanStampDepth] = useState(0.06)
+  const [booleanStampRotation, setBooleanStampRotation] = useState(0)
+  const [booleanStampOffset, setBooleanStampOffset] = useState(0.01)
+  const [booleanStampNudgeX, setBooleanStampNudgeX] = useState(0)
+  const [booleanStampNudgeY, setBooleanStampNudgeY] = useState(0)
+  const booleanLastHoverUpdateRef = useRef(0)
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
   const [texturing, setTexturing] = useState(false)
@@ -769,6 +1116,84 @@ export default function MeshEditorPage() {
     { value: 'difference', label: 'Difference' },
     { value: 'exclusion', label: 'Exclusion' }
   ], []);
+
+  useEffect(() => {
+    if (!geometry) {
+      setBooleanStampBasis(null)
+      setBooleanPlaceMode(false)
+      return
+    }
+
+    geometry.computeBoundingSphere()
+    const radius = Math.max(geometry.boundingSphere?.radius || 1, 0.01)
+    setBooleanStampSize(Math.max(radius * 0.2, 0.02))
+    setBooleanStampDepth(Math.max(radius * 0.06, 0.005))
+    setBooleanStampOffset(Math.max(radius * 0.005, 0.001))
+    setBooleanStampNudgeX(0)
+    setBooleanStampNudgeY(0)
+    setBooleanStampBasis(null)
+  }, [geometry])
+
+  useEffect(() => {
+    if (activeMenu !== 'boolean') {
+      setBooleanPlaceMode(false)
+      setBooleanStampBasis(null)
+    }
+  }, [activeMenu])
+
+  useEffect(() => {
+    let cancelled = false
+    let objectUrl = null
+
+    async function loadBooleanBrushMask() {
+      let sourceUrl = null
+      if (booleanBrushSource === 'asset' && booleanBrushAsset) {
+        sourceUrl = buildAssetUrl(booleanBrushAsset)
+      } else if (booleanBrushSource === 'computer' && booleanBrushFile) {
+        objectUrl = URL.createObjectURL(booleanBrushFile)
+        sourceUrl = objectUrl
+      }
+
+      if (!sourceUrl) {
+        booleanBrushMaskRef.current = null
+        setBooleanBrushRevision(current => current + 1)
+        return
+      }
+
+      try {
+        const image = new Image()
+        image.crossOrigin = 'anonymous'
+        await new Promise((resolve, reject) => {
+          image.onload = resolve
+          image.onerror = () => reject(new Error('Failed to load boolean brush image.'))
+          image.src = sourceUrl
+        })
+
+        if (cancelled) {
+          return
+        }
+
+        booleanBrushMaskRef.current = createBooleanBrushMaskFromImage(image)
+        setBooleanBrushRevision(current => current + 1)
+      } catch (err) {
+        if (cancelled) {
+          return
+        }
+        booleanBrushMaskRef.current = null
+        setBooleanBrushRevision(current => current + 1)
+        setError(err instanceof Error ? err.message : 'Failed to load boolean brush image.')
+      }
+    }
+
+    loadBooleanBrushMask()
+
+    return () => {
+      cancelled = true
+      if (objectUrl) {
+        URL.revokeObjectURL(objectUrl)
+      }
+    }
+  }, [booleanBrushAsset, booleanBrushFile, booleanBrushSource])
 
   const handlePaintBrushFileChange = useCallback((event) => {
     const file = event.target.files?.[0];
@@ -2118,6 +2543,62 @@ export default function MeshEditorPage() {
     return mesh
   }, [geometry])
 
+  const booleanStampLocalGeometry = useMemo(() => {
+    void booleanBrushRevision
+    const mask = booleanBrushMaskRef.current
+    if (!mask) {
+      return null
+    }
+
+    return buildBooleanStampGeometry(mask, booleanStampSize, booleanStampDepth)
+  }, [booleanBrushRevision, booleanStampDepth, booleanStampSize])
+
+  const booleanStampMatrix = useMemo(() => {
+    if (!booleanStampBasis) {
+      return null
+    }
+
+    return buildBooleanStampMatrix(
+      booleanStampBasis,
+      booleanStampRotation,
+      booleanStampOffset,
+      booleanStampNudgeX,
+      booleanStampNudgeY
+    )
+  }, [booleanStampBasis, booleanStampNudgeX, booleanStampNudgeY, booleanStampOffset, booleanStampRotation])
+
+  const booleanHasPreview = !!booleanStampLocalGeometry && !!booleanStampMatrix
+
+  const booleanResultPreviewGeometry = useMemo(() => {
+    if (!geometry || !booleanStampLocalGeometry || !booleanStampMatrix) {
+      return null
+    }
+
+    try {
+      const mask = booleanBrushMaskRef.current
+      return deformGeometryWithBooleanStamp(geometry, mask, booleanStampMatrix, {
+        operation: booleanOperation,
+        size: booleanStampSize,
+        depth: booleanStampDepth
+      })
+    } catch {
+      return null
+    }
+  }, [booleanOperation, booleanStampDepth, booleanStampLocalGeometry, booleanStampMatrix, booleanStampSize, geometry])
+
+  useEffect(() => () => booleanStampLocalGeometry?.dispose?.(), [booleanStampLocalGeometry])
+  useEffect(() => () => booleanResultPreviewGeometry?.dispose?.(), [booleanResultPreviewGeometry])
+
+  const booleanPreviewColor = useMemo(() => {
+    if (booleanOperation === 'subtract') {
+      return '#ff7c7c'
+    }
+    if (booleanOperation === 'intersect') {
+      return '#7cb4ff'
+    }
+    return '#72ff9d'
+  }, [booleanOperation])
+
   const textureWorkflowParameters = useMemo(() => {
     return (selectedTextureWorkflow?.parameters || []).filter(parameter => getWorkflowValueType(parameter) !== 'image')
   }, [selectedTextureWorkflow])
@@ -2217,7 +2698,7 @@ export default function MeshEditorPage() {
   }, [])
 
   const selectAtPoint = useCallback((point, isMultiSelect) => {
-    if (activeMenu === 'texturing' || !geometry || !cameraRef.current || !canvasShellRef.current) {
+    if (activeMenu !== 'modeling' || !geometry || !cameraRef.current || !canvasShellRef.current) {
       return
     }
 
@@ -2281,7 +2762,7 @@ export default function MeshEditorPage() {
   }, [])
 
   const selectWithinRectangle = useCallback((startPoint, endPoint, isMultiSelect) => {
-    if (activeMenu === 'texturing' || !geometry || !cameraRef.current || !canvasShellRef.current) {
+    if (activeMenu !== 'modeling' || !geometry || !cameraRef.current || !canvasShellRef.current) {
       return
     }
 
@@ -2357,6 +2838,34 @@ export default function MeshEditorPage() {
 
     const nextPoint = getPointerPosition(event)
     if (!nextPoint) {
+      return
+    }
+
+    if (activeMenu === 'boolean' && booleanPlaceMode) {
+      if (!selectionMesh) {
+        return
+      }
+      if (!booleanBrushMaskRef.current) {
+        setFeedback('Choose a boolean brush image first.')
+        return
+      }
+
+      const intersection = getMeshIntersection(nextPoint, selectionMesh)
+      if (!intersection?.point || !intersection?.face) {
+        return
+      }
+
+      const basis = computeBooleanStampBasis(intersection, cameraRef.current)
+      if (!basis) {
+        return
+      }
+
+      event.preventDefault()
+      setBooleanStampBasis(basis)
+      setBooleanStampNudgeX(0)
+      setBooleanStampNudgeY(0)
+      setBooleanPlaceMode(false)
+      setFeedback('Boolean stamp locked. Adjust size/depth/rotation/offset, or click Place stamp again to reposition.')
       return
     }
 
@@ -2604,6 +3113,10 @@ export default function MeshEditorPage() {
       return
     }
 
+    if (activeMenu !== 'modeling') {
+      return
+    }
+
     event.preventDefault()
 
     dragStateRef.current = {
@@ -2614,9 +3127,39 @@ export default function MeshEditorPage() {
     }
 
     canvasShellRef.current?.setPointerCapture?.(event.pointerId)
-  }, [activeMenu, applySculptStamp, beginPaintStroke, brushSize, computeSculptCursorPixelRadius, ensureSculptMesh, getMeshIntersection, getPointerPosition, numericAssetId, paintBrushSize, paintColor, paintFlow, paintHardness, paintLayers, paintMode, paintRotation, pendingPatch, pushSculptUndo, resetSelection, sculptBrush, sculptFrontFacesOnly, sculptHardness, sculptSize, sculptStampRotation, sculptSymmetry, selectedLayerId, stampBrushAtUv, syncProjectionMaskCanvasSize, texturableMesh, texturingReady])
+  }, [activeMenu, applySculptStamp, beginPaintStroke, booleanPlaceMode, brushSize, computeSculptCursorPixelRadius, ensureSculptMesh, getMeshIntersection, getPointerPosition, numericAssetId, paintBrushSize, paintColor, paintFlow, paintHardness, paintLayers, paintMode, paintRotation, pendingPatch, pushSculptUndo, resetSelection, sculptBrush, sculptFrontFacesOnly, sculptHardness, sculptSize, sculptStampRotation, sculptSymmetry, selectedLayerId, selectionMesh, stampBrushAtUv, syncProjectionMaskCanvasSize, texturableMesh, texturingReady])
 
   const handleCanvasPointerMove = useCallback((event) => {
+    if (activeMenu === 'boolean' && booleanPlaceMode) {
+      if (!selectionMesh || !booleanBrushMaskRef.current) {
+        return
+      }
+
+      const now = performance.now()
+      if (now - booleanLastHoverUpdateRef.current < 16) {
+        return
+      }
+      booleanLastHoverUpdateRef.current = now
+
+      const nextPoint = getPointerPosition(event)
+      if (!nextPoint) {
+        return
+      }
+
+      const intersection = getMeshIntersection(nextPoint, selectionMesh)
+      if (!intersection?.point || !intersection?.face) {
+        return
+      }
+
+      const basis = computeBooleanStampBasis(intersection, cameraRef.current)
+      if (!basis) {
+        return
+      }
+
+      setBooleanStampBasis(basis)
+      return
+    }
+
     if (activeMenu === 'sculpting') {
       const ctx = sculptContextRef.current
       const mesh = ensureSculptMesh()
@@ -2881,7 +3424,7 @@ export default function MeshEditorPage() {
       startPoint: dragStateRef.current.startPoint,
       endPoint: nextPoint
     })
-  }, [activeMenu, applySculptStamp, brushSize, computeSculptCursorPixelRadius, ensureSculptMesh, getMeshIntersection, getPointerPosition, paintBrushSize, paintColor, paintFlow, paintHardness, paintMode, paintRotation, recompositePaintTexture, sculptSpacing, sculptSteadyStroke, sculptStrength, stampBrushAtUv, texturableMesh, updateMaskOverlay])
+  }, [activeMenu, applySculptStamp, booleanPlaceMode, brushSize, computeSculptCursorPixelRadius, ensureSculptMesh, getMeshIntersection, getPointerPosition, paintBrushSize, paintColor, paintFlow, paintHardness, paintMode, paintRotation, recompositePaintTexture, sculptSpacing, sculptSteadyStroke, sculptStrength, selectionMesh, stampBrushAtUv, texturableMesh, updateMaskOverlay])
 
   const handleCanvasPointerUp = useCallback((event) => {
     if (activeMenu === 'sculpting') {
@@ -3166,6 +3709,47 @@ export default function MeshEditorPage() {
 
     applyGeometryUpdate(fillHoleLoops(geometry, loopsToFill), [])
   }, [applyGeometryUpdate, availableHoleLoops, geometry, selectedVertexIndices, selectionMode])
+
+  const handleApplyBoolean = useCallback(() => {
+    if (!geometry || !booleanStampLocalGeometry || !booleanStampMatrix) {
+      return
+    }
+
+    try {
+      setError('')
+      const nextGeometry = booleanResultPreviewGeometry?.clone?.() || deformGeometryWithBooleanStamp(
+        geometry,
+        booleanBrushMaskRef.current,
+        booleanStampMatrix,
+        {
+          operation: booleanOperation,
+          size: booleanStampSize,
+          depth: booleanStampDepth
+        }
+      )
+
+      if (!nextGeometry) {
+        setError('Unable to apply brush deformation at this position.')
+        setFeedback('')
+        return
+      }
+
+      applyGeometryUpdate(nextGeometry, [])
+      setBooleanPlaceMode(false)
+      setBooleanStampBasis(null)
+      setFeedback(`Brush deformation (${booleanOperation}) applied.`)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Boolean operation failed.')
+      setFeedback('')
+    }
+  }, [applyGeometryUpdate, booleanOperation, booleanResultPreviewGeometry, booleanStampDepth, booleanStampLocalGeometry, booleanStampMatrix, booleanStampSize, geometry])
+
+  const handleClearBooleanStamp = useCallback(() => {
+    setBooleanStampBasis(null)
+    setBooleanStampNudgeX(0)
+    setBooleanStampNudgeY(0)
+    setBooleanPlaceMode(false)
+  }, [])
 
   const handleSave = useCallback(async (saveMode) => {
     if (!geometry || saving) {
@@ -3754,6 +4338,15 @@ export default function MeshEditorPage() {
                   </button>
                   <button
                     type="button"
+                    className={`mesh-editor-mode-btn ${activeMenu === 'boolean' ? 'mesh-editor-mode-btn--active' : ''}`}
+                    onClick={() => setActiveMenu('boolean')}
+                    title="Apply brush-based boolean operations"
+                  >
+                    <span className="material-symbols-outlined">difference</span>
+                    <span>Boolean</span>
+                  </button>
+                  <button
+                    type="button"
                     className={`mesh-editor-mode-btn ${activeMenu === 'sculpting' ? 'mesh-editor-mode-btn--active' : ''}`}
                     onClick={() => setActiveMenu('sculpting')}
                     title="Sculpt the mesh with brushes"
@@ -3842,6 +4435,196 @@ export default function MeshEditorPage() {
                     <div className="mesh-editor-panel__notes">
                       <span className="mesh-editor-panel__hint">Left mouse drag selects with a rectangle. Shift+drag adds or removes items.</span>
                       <span className="mesh-editor-panel__hint">Middle mouse drag rotates the mesh.</span>
+                    </div>
+                  </>
+                ) : activeMenu === 'boolean' ? (
+                  <>{/* BOOLEAN */}
+                    <div className="mesh-editor-panel__section">
+                      <span className="mesh-editor-panel__section-title">Boolean stamp</span>
+
+                      <div className="mesh-editor-workflow-field">
+                        <span>Brush source</span>
+                        <select
+                          className="mesh-editor-panel__input mesh-editor-panel__select"
+                          value={booleanBrushSource}
+                          onChange={event => setBooleanBrushSource(event.target.value)}
+                        >
+                          <option value="asset">From assets</option>
+                          <option value="computer">From computer</option>
+                        </select>
+                      </div>
+
+                      {booleanBrushSource === 'asset' ? (
+                        <button
+                          type="button"
+                          className="mesh-editor-btn mesh-editor-btn--secondary"
+                          onClick={() => setShowBooleanBrushSelector(true)}
+                        >
+                          <span className="material-symbols-outlined">stamp</span>
+                          {booleanBrushAsset ? `Brush: ${booleanBrushAsset.name}` : 'Choose boolean brush…'}
+                        </button>
+                      ) : (
+                        <div className="mesh-editor-workflow-field">
+                          <input
+                            ref={booleanBrushFileInputRef}
+                            type="file"
+                            accept="image/*"
+                            style={{ display: 'none' }}
+                            onChange={event => {
+                              const file = event.target.files?.[0]
+                              if (file) {
+                                setBooleanBrushFile(file)
+                                setBooleanBrushAsset(null)
+                              }
+                              event.target.value = ''
+                            }}
+                          />
+                          <button
+                            type="button"
+                            className="mesh-editor-btn mesh-editor-btn--secondary"
+                            onClick={() => booleanBrushFileInputRef.current?.click()}
+                          >
+                            <span className="material-symbols-outlined">upload_file</span>
+                            {booleanBrushFile ? booleanBrushFile.name : 'Upload boolean brush…'}
+                          </button>
+                        </div>
+                      )}
+
+                      <div className="mesh-editor-workflow-field">
+                        <span>Operation</span>
+                        <select
+                          className="mesh-editor-panel__input mesh-editor-panel__select"
+                          value={booleanOperation}
+                          onChange={event => setBooleanOperation(event.target.value)}
+                        >
+                          <option value="union">Union</option>
+                          <option value="subtract">Subtract</option>
+                          <option value="intersect">Intersect</option>
+                        </select>
+                      </div>
+
+                      <button
+                        type="button"
+                        className={`mesh-editor-btn ${booleanPlaceMode ? 'mesh-editor-btn--primary' : 'mesh-editor-btn--ghost'}`}
+                        disabled={!booleanBrushMaskRef.current}
+                        onClick={() => {
+                          setBooleanPlaceMode(current => !current)
+                          if (booleanPlaceMode) {
+                            setBooleanStampBasis(null)
+                          }
+                        }}
+                      >
+                        <span className="material-symbols-outlined">ads_click</span>
+                        {booleanPlaceMode ? 'Placing: move pointer on mesh' : 'Place stamp'}
+                      </button>
+
+                      <label className="mesh-editor-range-field">
+                        <span>Size</span>
+                        <input
+                          type="range"
+                          min="0.01"
+                          max={Math.max(0.05, stats.faces > 0 ? booleanStampSize * 4 : 1)}
+                          step="0.001"
+                          value={booleanStampSize}
+                          onChange={event => setBooleanStampSize(Number(event.target.value))}
+                          disabled={!booleanBrushMaskRef.current}
+                        />
+                        <strong>{booleanStampSize.toFixed(3)}</strong>
+                      </label>
+                      <label className="mesh-editor-range-field">
+                        <span>Depth</span>
+                        <input
+                          type="range"
+                          min="0.001"
+                          max={Math.max(0.02, booleanStampDepth * 6)}
+                          step="0.001"
+                          value={booleanStampDepth}
+                          onChange={event => setBooleanStampDepth(Number(event.target.value))}
+                          disabled={!booleanBrushMaskRef.current}
+                        />
+                        <strong>{booleanStampDepth.toFixed(3)}</strong>
+                      </label>
+                      <label className="mesh-editor-range-field">
+                        <span>Rotation</span>
+                        <input
+                          type="range"
+                          min="0"
+                          max="360"
+                          step="1"
+                          value={booleanStampRotation}
+                          onChange={event => setBooleanStampRotation(Number(event.target.value))}
+                          disabled={!booleanStampBasis}
+                        />
+                        <strong>{booleanStampRotation}°</strong>
+                      </label>
+                      <label className="mesh-editor-range-field">
+                        <span>Normal offset</span>
+                        <input
+                          type="range"
+                          min={-Math.max(0.01, booleanStampDepth * 2)}
+                          max={Math.max(0.01, booleanStampDepth * 2)}
+                          step="0.001"
+                          value={booleanStampOffset}
+                          onChange={event => setBooleanStampOffset(Number(event.target.value))}
+                          disabled={!booleanStampBasis}
+                        />
+                        <strong>{booleanStampOffset.toFixed(3)}</strong>
+                      </label>
+                      <label className="mesh-editor-range-field">
+                        <span>Nudge X</span>
+                        <input
+                          type="range"
+                          min={-Math.max(0.01, booleanStampSize)}
+                          max={Math.max(0.01, booleanStampSize)}
+                          step="0.001"
+                          value={booleanStampNudgeX}
+                          onChange={event => setBooleanStampNudgeX(Number(event.target.value))}
+                          disabled={!booleanStampBasis}
+                        />
+                        <strong>{booleanStampNudgeX.toFixed(3)}</strong>
+                      </label>
+                      <label className="mesh-editor-range-field">
+                        <span>Nudge Y</span>
+                        <input
+                          type="range"
+                          min={-Math.max(0.01, booleanStampSize)}
+                          max={Math.max(0.01, booleanStampSize)}
+                          step="0.001"
+                          value={booleanStampNudgeY}
+                          onChange={event => setBooleanStampNudgeY(Number(event.target.value))}
+                          disabled={!booleanStampBasis}
+                        />
+                        <strong>{booleanStampNudgeY.toFixed(3)}</strong>
+                      </label>
+
+                      <div className="mesh-editor-icon-grid mesh-editor-icon-grid--double">
+                        <button
+                          type="button"
+                          className="mesh-editor-btn mesh-editor-btn--primary"
+                          onClick={handleApplyBoolean}
+                          disabled={!booleanStampLocalGeometry || !booleanStampMatrix}
+                          title="Apply boolean operation"
+                        >
+                          <span className="material-symbols-outlined">check</span>
+                          <span>Apply Boolean</span>
+                        </button>
+                        <button
+                          type="button"
+                          className="mesh-editor-btn mesh-editor-btn--ghost"
+                          onClick={handleClearBooleanStamp}
+                          disabled={!booleanStampBasis && !booleanPlaceMode}
+                          title="Clear boolean placement"
+                        >
+                          <span className="material-symbols-outlined">close</span>
+                          <span>Clear</span>
+                        </button>
+                      </div>
+                    </div>
+
+                    <div className="mesh-editor-panel__notes">
+                      <span className="mesh-editor-panel__hint">Pick a brush, click Place stamp, then move over the mesh to position it.</span>
+                      <span className="mesh-editor-panel__hint">Use size/depth/rotation/offset and nudge sliders for final placement.</span>
+                      <span className="mesh-editor-panel__hint">Click Apply Boolean to commit Union / Subtract / Intersect.</span>
                     </div>
                   </>
                 ) : activeMenu === 'texturing' ? (
@@ -4357,11 +5140,39 @@ export default function MeshEditorPage() {
                       />
                     ) : (
                       <EditorMesh
-                        geometry={geometry}
-                        selectedFaceIndices={selectedFaceIndices}
-                        selectedVertexIndices={selectedVertexIndices}
+                        geometry={activeMenu === 'boolean' && booleanResultPreviewGeometry ? booleanResultPreviewGeometry : geometry}
+                        selectedFaceIndices={activeMenu === 'modeling' ? selectedFaceIndices : []}
+                        selectedVertexIndices={activeMenu === 'modeling' ? selectedVertexIndices : []}
                         showShadows={showShadows}
                       />
+                    )}
+                    {activeMenu === 'boolean' && booleanHasPreview && !booleanResultPreviewGeometry && (
+                      <group renderOrder={30}>
+                        <mesh geometry={booleanStampLocalGeometry} matrix={booleanStampMatrix} matrixAutoUpdate={false}>
+                          <meshStandardMaterial
+                            color={booleanPreviewColor}
+                            emissive={booleanPreviewColor}
+                            emissiveIntensity={0.2}
+                            transparent
+                            opacity={0.36}
+                            metalness={0.05}
+                            roughness={0.45}
+                            depthTest={false}
+                            depthWrite={false}
+                            side={THREE.DoubleSide}
+                          />
+                        </mesh>
+                        <mesh geometry={booleanStampLocalGeometry} matrix={booleanStampMatrix} matrixAutoUpdate={false}>
+                          <meshBasicMaterial
+                            color="#ffffff"
+                            wireframe
+                            transparent
+                            opacity={0.95}
+                            depthTest={false}
+                            depthWrite={false}
+                          />
+                        </mesh>
+                      </group>
                     )}
                     <Grid
                       infiniteGrid
@@ -4560,6 +5371,17 @@ export default function MeshEditorPage() {
             setShowBrushSelector(false);
           }}
           onClose={() => setShowBrushSelector(false)}
+        />
+      )}
+      {showBooleanBrushSelector && (
+        <AssetSelectorModal
+          assetType="brush"
+          onSelect={(asset) => {
+            setBooleanBrushAsset(asset)
+            setBooleanBrushFile(null)
+            setShowBooleanBrushSelector(false)
+          }}
+          onClose={() => setShowBooleanBrushSelector(false)}
         />
       )}
       {showSculptStampSelector && (

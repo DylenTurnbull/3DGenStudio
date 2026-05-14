@@ -7,6 +7,7 @@ import { PLYLoader } from 'three/examples/jsm/loaders/PLYLoader.js'
 import { STLLoader } from 'three/examples/jsm/loaders/STLLoader.js'
 import { mergeGeometries, mergeVertices } from 'three/examples/jsm/utils/BufferGeometryUtils.js'
 import { acceleratedRaycast, computeBoundsTree, disposeBoundsTree } from 'three-mesh-bvh'
+import { ADDITION, Brush, Evaluator, INTERSECTION, SUBTRACTION } from 'three-bvh-csg'
 
 if (THREE.BufferGeometry.prototype.computeBoundsTree !== computeBoundsTree) {
   THREE.BufferGeometry.prototype.computeBoundsTree = computeBoundsTree
@@ -31,6 +32,16 @@ function invalidateGeometryAnalysis(geometry) {
 function finalizeGeometry(geometry, { rebuildBoundsTree = true } = {}) {
   if (!geometry) {
     return geometry
+  }
+
+  if (!geometry.index && geometry.attributes?.position?.count) {
+    const vertexCount = geometry.attributes.position.count
+    const IndexArray = vertexCount > 65535 ? Uint32Array : Uint16Array
+    const indices = new IndexArray(vertexCount)
+    for (let index = 0; index < vertexCount; index += 1) {
+      indices[index] = index
+    }
+    geometry.setIndex(new THREE.BufferAttribute(indices, 1))
   }
 
   if (!geometry.attributes.normal) {
@@ -845,6 +856,62 @@ export async function loadEditableGeometryFromUrl(url) {
 
 export function geometryFaceCount(geometry) {
   return geometry?.index ? geometry.index.count / 3 : 0
+}
+
+function resolveBooleanOperation(operation = 'union') {
+  const normalized = String(operation || 'union').toLowerCase()
+
+  if (normalized === 'subtract' || normalized === 'substract' || normalized === 'difference') {
+    return SUBTRACTION
+  }
+
+  if (normalized === 'intersect' || normalized === 'intersection') {
+    return INTERSECTION
+  }
+
+  return ADDITION
+}
+
+function prepareBooleanGeometry(geometry) {
+  if (!geometry?.attributes?.position) {
+    return null
+  }
+
+  const clone = geometry.clone()
+  clone.deleteAttribute?.('normal')
+  return finalizeGeometry(clone)
+}
+
+export function applyBooleanOperation(baseGeometry, operandGeometry, operation = 'union') {
+  if (!baseGeometry?.attributes?.position || !operandGeometry?.attributes?.position) {
+    throw new Error('Both base and operand geometries are required for Boolean operations.')
+  }
+
+  const preparedBase = prepareBooleanGeometry(baseGeometry)
+  const preparedOperand = prepareBooleanGeometry(operandGeometry)
+  if (!preparedBase || !preparedOperand) {
+    throw new Error('Boolean operation failed because one of the geometries is invalid.')
+  }
+
+  const evaluator = new Evaluator()
+  const baseBrush = new Brush(preparedBase)
+  const operandBrush = new Brush(preparedOperand)
+  baseBrush.updateMatrixWorld(true)
+  operandBrush.updateMatrixWorld(true)
+
+  const csgOperation = resolveBooleanOperation(operation)
+  const resultBrush = evaluator.evaluate(baseBrush, operandBrush, csgOperation)
+  const rawResultGeometry = resultBrush?.geometry?.clone?.()
+
+  if (!rawResultGeometry) {
+    throw new Error('Boolean operation failed to produce geometry.')
+  }
+
+  const resultGeometry = rawResultGeometry.index
+    ? rawResultGeometry
+    : mergeVertices(rawResultGeometry, 1e-5)
+
+  return finalizeGeometry(resultGeometry)
 }
 
 export function deleteSelectedFaces(geometry, selectedFaceIndices = []) {
