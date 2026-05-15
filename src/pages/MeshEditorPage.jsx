@@ -339,7 +339,7 @@ function sampleBooleanMaskAlpha(mask, u, v) {
 }
 
 function deformGeometryWithBooleanStamp(baseGeometry, mask, stampMatrix, {
-  operation = 'union',
+  operation = 'out',
   size = 0.2,
   depth = 0.06,
   offset = 0.01,
@@ -374,11 +374,8 @@ function deformGeometryWithBooleanStamp(baseGeometry, mask, stampMatrix, {
   const displacement = new THREE.Vector3()
 
   let sign = 1
-  const op = String(operation || 'union').toLowerCase()
-  if (op === 'subtract' || op === 'substract' || op === 'difference') {
-    sign = -1
-  } else if (op === 'intersect' || op === 'intersection') {
-    // Intersect behaves as a flatten-carve toward the stamp plane.
+  const op = String(operation || 'out').toLowerCase()
+  if (op === 'in' || op === 'subtract' || op === 'substract' || op === 'difference') {
     sign = -1
   }
 
@@ -975,7 +972,7 @@ function BooleanPreviewMesh({
     const maxDim = Math.max(maskWidth || 1, maskHeight || 1)
     const stampWidth = Math.max(1e-5, size * ((maskWidth || 1) / maxDim))
     const stampHeight = Math.max(1e-5, size * ((maskHeight || 1) / maxDim))
-    const sign = (String(operation || 'union').toLowerCase() === 'union') ? 1 : -1
+    const sign = (String(operation || 'out').toLowerCase() === 'out') ? 1 : -1
 
     uniforms.uInvStamp.value.copy(stampMatrix).invert()
     uniforms.uStampSize.value.set(stampWidth, stampHeight)
@@ -1231,7 +1228,7 @@ export default function MeshEditorPage() {
   const [modelingCanRedo, setModelingCanRedo] = useState(false)
   const modelingUndoStackRef = useRef([])
   const modelingRedoStackRef = useRef([])
-  const [booleanOperation, setBooleanOperation] = useState('union')
+  const [booleanOperation, setBooleanOperation] = useState('out')
   const [booleanPlaceMode, setBooleanPlaceMode] = useState(false)
   const [booleanBrushSource, setBooleanBrushSource] = useState('asset')
   const [booleanBrushAsset, setBooleanBrushAsset] = useState(null)
@@ -4754,10 +4751,10 @@ export default function MeshEditorPage() {
                     type="button"
                     className={`mesh-editor-mode-btn ${activeMenu === 'boolean' ? 'mesh-editor-mode-btn--active' : ''}`}
                     onClick={() => setActiveMenu('boolean')}
-                    title="Apply brush-based boolean operations"
+                    title="Apply brush-based displacement operations"
                   >
                     <span className="material-symbols-outlined">difference</span>
-                    <span>Boolean</span>
+                    <span>Displace</span>
                   </button>
                   <button
                     type="button"
@@ -4852,9 +4849,9 @@ export default function MeshEditorPage() {
                     </div>
                   </>
                 ) : activeMenu === 'boolean' ? (
-                  <>{/* BOOLEAN */}
+                  <>{/* DISPLACE */}
                     <div className="mesh-editor-panel__section">
-                      <span className="mesh-editor-panel__section-title">Boolean stamp</span>
+                      <span className="mesh-editor-panel__section-title">Displace stamp</span>
 
                       <div className="mesh-editor-workflow-field">
                         <span>Brush source</span>
@@ -4875,7 +4872,7 @@ export default function MeshEditorPage() {
                           onClick={() => setShowBooleanBrushSelector(true)}
                         >
                           <span className="material-symbols-outlined">stamp</span>
-                          {booleanBrushAsset ? `Brush: ${booleanBrushAsset.name}` : 'Choose boolean brush…'}
+                          {booleanBrushAsset ? `Brush: ${booleanBrushAsset.name}` : 'Choose displace brush…'}
                         </button>
                       ) : (
                         <div className="mesh-editor-workflow-field">
@@ -4899,7 +4896,7 @@ export default function MeshEditorPage() {
                             onClick={() => booleanBrushFileInputRef.current?.click()}
                           >
                             <span className="material-symbols-outlined">upload_file</span>
-                            {booleanBrushFile ? booleanBrushFile.name : 'Upload boolean brush…'}
+                            {booleanBrushFile ? booleanBrushFile.name : 'Upload displace brush…'}
                           </button>
                         </div>
                       )}
@@ -4911,9 +4908,8 @@ export default function MeshEditorPage() {
                           value={booleanOperation}
                           onChange={event => setBooleanOperation(event.target.value)}
                         >
-                          <option value="union">Union</option>
-                          <option value="subtract">Subtract</option>
-                          <option value="intersect">Intersect</option>
+                          <option value="out">Out</option>
+                          <option value="in">In</option>
                         </select>
                       </div>
 
@@ -5030,17 +5026,17 @@ export default function MeshEditorPage() {
                           className="mesh-editor-btn mesh-editor-btn--primary"
                           onClick={handleApplyBoolean}
                           disabled={!booleanStampLocalGeometry || !booleanStampMatrix}
-                          title="Apply boolean operation"
+                          title="Apply displacement operation"
                         >
                           <span className="material-symbols-outlined">check</span>
-                          <span>Apply Boolean</span>
+                          <span>Apply Displace</span>
                         </button>
                         <button
                           type="button"
                           className="mesh-editor-btn mesh-editor-btn--ghost"
                           onClick={handleClearBooleanStamp}
                           disabled={!booleanStampBasis && !booleanPlaceMode}
-                          title="Clear boolean placement"
+                          title="Clear displacement placement"
                         >
                           <span className="material-symbols-outlined">close</span>
                           <span>Clear</span>
@@ -5051,7 +5047,7 @@ export default function MeshEditorPage() {
                     <div className="mesh-editor-panel__notes">
                       <span className="mesh-editor-panel__hint">Pick a brush, click Place stamp, move over mesh to position, then click to lock. Click the mesh again to reposition.</span>
                       <span className="mesh-editor-panel__hint">Use size/depth/rotation/offset and nudge sliders for final placement.</span>
-                      <span className="mesh-editor-panel__hint">Click Apply Boolean to commit Union / Subtract / Intersect.</span>
+                      <span className="mesh-editor-panel__hint">Click Apply Displace to commit Out / In operations.</span>
                     </div>
                   </>
                 ) : activeMenu === 'texturing' ? (
