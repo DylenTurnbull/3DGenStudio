@@ -583,6 +583,34 @@ function resolveProjectionLayersIntoImageData(outputData, layerSnapshots, width,
   }
 
   const pixelCount = width * height
+  const getLayerMetrics = (layer, pixelIndex, pixelOffset) => {
+    if (!layer?.coverageMask?.[pixelIndex]) {
+      return null
+    }
+
+    const srcAlpha = (layer.pixelData[pixelOffset + 3] || 0) / 255
+    if (srcAlpha <= 1e-4) {
+      return null
+    }
+
+    const alpha = clamp01((layer.opacity ?? 1) * srcAlpha)
+    if (alpha <= 1e-4) {
+      return null
+    }
+
+    const confidence = Math.max(0.02, Math.min(1, layer.confidenceMap?.[pixelIndex] || srcAlpha))
+    const ownedFactor = layer.ownershipMask?.[pixelIndex] ? 1 : 0.78
+    const coverageScore = confidence * srcAlpha * ownedFactor
+    if (coverageScore <= 1e-6) {
+      return null
+    }
+
+    return {
+      alpha,
+      coverageScore,
+      weightScore: coverageScore * alpha
+    }
+  }
 
   for (let i = 0; i < pixelCount; i += 1) {
     const j = i * 4
@@ -592,47 +620,33 @@ function resolveProjectionLayersIntoImageData(outputData, layerSnapshots, width,
 
     let bestLayer = -1
     let secondLayer = -1
-    let bestScore = 0
-    let secondScore = 0
+    let bestCoverageScore = 0
+    let secondCoverageScore = 0
     let candidateCount = 0
     let sharedCandidateCount = 0
 
     for (let layerIndex = 0; layerIndex < layerSnapshots.length; layerIndex += 1) {
       const layer = layerSnapshots[layerIndex]
-      if (!layer?.coverageMask?.[i]) {
+      const metrics = getLayerMetrics(layer, i, j)
+      if (!metrics) {
         continue
       }
 
-      const srcAlpha = (layer.pixelData[j + 3] || 0) / 255
-      if (srcAlpha <= 1e-4) {
-        continue
-      }
-
-      const alpha = clamp01((layer.opacity ?? 1) * srcAlpha)
-      if (alpha <= 1e-4) {
-        continue
-      }
-
-      const confidence = Math.max(0.02, Math.min(1, layer.confidenceMap?.[i] || alpha))
-      const ownedFactor = layer.ownershipMask?.[i] ? 1 : 0.78
-      const score = confidence * alpha * ownedFactor
-      if (score <= 1e-6) {
-        continue
-      }
+      const coverageScore = metrics.coverageScore
 
       candidateCount += 1
       if (layer.sharedSeamMask?.[i]) {
         sharedCandidateCount += 1
       }
 
-      if (score > bestScore) {
+      if (coverageScore > bestCoverageScore) {
         secondLayer = bestLayer
-        secondScore = bestScore
+        secondCoverageScore = bestCoverageScore
         bestLayer = layerIndex
-        bestScore = score
-      } else if (score > secondScore) {
+        bestCoverageScore = coverageScore
+      } else if (coverageScore > secondCoverageScore) {
         secondLayer = layerIndex
-        secondScore = score
+        secondCoverageScore = coverageScore
       }
     }
 
@@ -655,12 +669,19 @@ function resolveProjectionLayersIntoImageData(outputData, layerSnapshots, width,
       outputData[j + 3] = 255
     }
 
-    if (candidateCount === 1 || bestScore <= 1e-6) {
+    if (candidateCount === 1 || bestCoverageScore <= 1e-6) {
       applySingleLayer(bestLayer)
       continue
     }
 
-    const shouldBlend = sharedCandidateCount >= 2 || secondScore >= bestScore * 0.72
+    const bestLayerOwnsTexel = !!layerSnapshots[bestLayer]?.ownershipMask?.[i]
+    const bestLayerInSharedSeam = !!layerSnapshots[bestLayer]?.sharedSeamMask?.[i]
+    const secondLayerOwnsTexel = secondLayer !== -1 && !!layerSnapshots[secondLayer]?.ownershipMask?.[i]
+    const canBlendAgainstOwnedWinner = !bestLayerOwnsTexel || bestLayerInSharedSeam || secondLayerOwnsTexel
+    const shouldBlend = sharedCandidateCount >= 2 || (
+      canBlendAgainstOwnedWinner
+      && secondCoverageScore >= bestCoverageScore * 0.72
+    )
     if (!shouldBlend) {
       applySingleLayer(bestLayer)
       continue
@@ -671,28 +692,12 @@ function resolveProjectionLayersIntoImageData(outputData, layerSnapshots, width,
     let accumG = 0
     let accumB = 0
     let accumAlpha = 0
-    const minBlendScore = Math.max(bestScore * 0.28, 1e-5)
+    const minBlendScore = Math.max(bestCoverageScore * 0.28, 1e-5)
 
     for (let layerIndex = 0; layerIndex < layerSnapshots.length; layerIndex += 1) {
       const layer = layerSnapshots[layerIndex]
-      if (!layer?.coverageMask?.[i]) {
-        continue
-      }
-
-      const srcAlpha = (layer.pixelData[j + 3] || 0) / 255
-      if (srcAlpha <= 1e-4) {
-        continue
-      }
-
-      const alpha = clamp01((layer.opacity ?? 1) * srcAlpha)
-      if (alpha <= 1e-4) {
-        continue
-      }
-
-      const confidence = Math.max(0.02, Math.min(1, layer.confidenceMap?.[i] || alpha))
-      const ownedFactor = layer.ownershipMask?.[i] ? 1 : 0.78
-      const score = confidence * alpha * ownedFactor
-      if (score < minBlendScore) {
+      const metrics = getLayerMetrics(layer, i, j)
+      if (!metrics || metrics.coverageScore < minBlendScore) {
         continue
       }
 
@@ -704,13 +709,16 @@ function resolveProjectionLayersIntoImageData(outputData, layerSnapshots, width,
       const srcG = layer.pixelData[j + 1]
       const srcB = layer.pixelData[j + 2]
       const [blendR, blendG, blendB] = blendRgbByMode(layer.blendMode, baseR, baseG, baseB, srcR, srcG, srcB)
-      const weight = score * score
+      const weight = metrics.weightScore * metrics.weightScore
+      if (weight <= 1e-6) {
+        continue
+      }
 
       totalWeight += weight
       accumR += blendR * weight
       accumG += blendG * weight
       accumB += blendB * weight
-      accumAlpha += alpha * weight
+      accumAlpha += metrics.alpha * weight
     }
 
     if (totalWeight <= 1e-6) {
