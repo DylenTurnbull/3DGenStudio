@@ -288,7 +288,7 @@ function buildProjectionSharedSeamMask(coverageMask, ownershipMask, width, heigh
   return sharedMask
 }
 
-function buildProjectionConfidenceMap(accumulatedWeight, coverageMask) {
+function buildProjectionConfidenceMap(accumulatedWeight, coverageMask, alphaBytes) {
   const pixelCount = accumulatedWeight?.length || 0
   const confidence = new Float32Array(pixelCount)
   if (!accumulatedWeight || !pixelCount) {
@@ -302,6 +302,11 @@ function buildProjectionConfidenceMap(accumulatedWeight, coverageMask) {
 
     const weight = Math.max(0, Number(accumulatedWeight[i]) || 0)
     if (weight <= 1e-6) {
+      if (alphaBytes && alphaBytes[i] > 0) {
+        // UV gap-filled fringes have 0 accumulated weight but are crucial to prevent black cracks.
+        // We restore their confidence using the dilated alpha.
+        confidence[i] = alphaBytes[i] / 255
+      }
       continue
     }
 
@@ -583,34 +588,6 @@ function resolveProjectionLayersIntoImageData(outputData, layerSnapshots, width,
   }
 
   const pixelCount = width * height
-  const getLayerMetrics = (layer, pixelIndex, pixelOffset) => {
-    if (!layer?.coverageMask?.[pixelIndex]) {
-      return null
-    }
-
-    const srcAlpha = (layer.pixelData[pixelOffset + 3] || 0) / 255
-    if (srcAlpha <= 1e-4) {
-      return null
-    }
-
-    const alpha = clamp01((layer.opacity ?? 1) * srcAlpha)
-    if (alpha <= 1e-4) {
-      return null
-    }
-
-    const confidence = Math.max(0.02, Math.min(1, layer.confidenceMap?.[pixelIndex] || srcAlpha))
-    const ownedFactor = layer.ownershipMask?.[pixelIndex] ? 1 : 0.78
-    const coverageScore = confidence * srcAlpha * ownedFactor
-    if (coverageScore <= 1e-6) {
-      return null
-    }
-
-    return {
-      alpha,
-      coverageScore,
-      weightScore: coverageScore * alpha
-    }
-  }
 
   for (let i = 0; i < pixelCount; i += 1) {
     const j = i * 4
@@ -618,90 +595,47 @@ function resolveProjectionLayersIntoImageData(outputData, layerSnapshots, width,
     const baseG = outputData[j + 1]
     const baseB = outputData[j + 2]
 
-    let bestLayer = -1
-    let secondLayer = -1
-    let bestCoverageScore = 0
-    let secondCoverageScore = 0
-    let candidateCount = 0
-    let sharedCandidateCount = 0
-
-    for (let layerIndex = 0; layerIndex < layerSnapshots.length; layerIndex += 1) {
-      const layer = layerSnapshots[layerIndex]
-      const metrics = getLayerMetrics(layer, i, j)
-      if (!metrics) {
-        continue
-      }
-
-      const coverageScore = metrics.coverageScore
-
-      candidateCount += 1
-      if (layer.sharedSeamMask?.[i]) {
-        sharedCandidateCount += 1
-      }
-
-      if (coverageScore > bestCoverageScore) {
-        secondLayer = bestLayer
-        secondCoverageScore = bestCoverageScore
-        bestLayer = layerIndex
-        bestCoverageScore = coverageScore
-      } else if (coverageScore > secondCoverageScore) {
-        secondLayer = layerIndex
-        secondCoverageScore = coverageScore
-      }
-    }
-
-    if (bestLayer === -1) {
-      continue
-    }
-
-    const applySingleLayer = layerIndex => {
-      const layer = layerSnapshots[layerIndex]
-      const srcR = layer.pixelData[j]
-      const srcG = layer.pixelData[j + 1]
-      const srcB = layer.pixelData[j + 2]
-      const srcAlpha = (layer.pixelData[j + 3] || 0) / 255
-      const alpha = clamp01((layer.opacity ?? 1) * srcAlpha)
-      const [blendR, blendG, blendB] = blendRgbByMode(layer.blendMode, baseR, baseG, baseB, srcR, srcG, srcB)
-
-      outputData[j] = Math.round(baseR * (1 - alpha) + blendR * alpha)
-      outputData[j + 1] = Math.round(baseG * (1 - alpha) + blendG * alpha)
-      outputData[j + 2] = Math.round(baseB * (1 - alpha) + blendB * alpha)
-      outputData[j + 3] = 255
-    }
-
-    if (candidateCount === 1 || bestCoverageScore <= 1e-6) {
-      applySingleLayer(bestLayer)
-      continue
-    }
-
-    const bestLayerOwnsTexel = !!layerSnapshots[bestLayer]?.ownershipMask?.[i]
-    const bestLayerInSharedSeam = !!layerSnapshots[bestLayer]?.sharedSeamMask?.[i]
-    const secondLayerOwnsTexel = secondLayer !== -1 && !!layerSnapshots[secondLayer]?.ownershipMask?.[i]
-    const canBlendAgainstOwnedWinner = !bestLayerOwnsTexel || bestLayerInSharedSeam || secondLayerOwnsTexel
-    const shouldBlend = sharedCandidateCount >= 2 || (
-      canBlendAgainstOwnedWinner
-      && secondCoverageScore >= bestCoverageScore * 0.72
-    )
-    if (!shouldBlend) {
-      applySingleLayer(bestLayer)
-      continue
-    }
-
-    let totalWeight = 0
     let accumR = 0
     let accumG = 0
     let accumB = 0
-    let accumAlpha = 0
-    const minBlendScore = Math.max(bestCoverageScore * 0.28, 1e-5)
+    let accumWeight = 0
+    let finalMaxOpacity = 0
 
     for (let layerIndex = 0; layerIndex < layerSnapshots.length; layerIndex += 1) {
+      if (accumWeight >= 0.999) {
+        break // Fully occluded by previous layers' weighted color
+      }
+
       const layer = layerSnapshots[layerIndex]
-      const metrics = getLayerMetrics(layer, i, j)
-      if (!metrics || metrics.coverageScore < minBlendScore) {
+      if (!layer?.coverageMask?.[i]) {
         continue
       }
 
-      if (sharedCandidateCount < 2 && layerIndex !== bestLayer && layerIndex !== secondLayer) {
+      const srcAlpha = (layer.pixelData[j + 3] || 0) / 255
+      if (srcAlpha <= 1e-4) {
+        continue
+      }
+
+      const layerOpacity = clamp01((layer.opacity ?? 1) * srcAlpha)
+      
+      // Use the pure 3D mathematically-derived confidence (based on facing angle and distance)
+      // We do NOT feather based on flat 2D pixels, and we do NOT artificially clamp it 
+      // based on polygon face-ownership, which caused perfectly jagged triangle borders.
+      let conf = layer.confidenceMap?.[i] || 0
+
+      // A gentle curve to contrast the confidence slightly over the mesh curvature, 
+      // but without forcing it to 1.0 abruptly.
+      const smoothConf = conf * conf * (3 - 2 * conf)
+
+      const mixWeight = smoothConf * layerOpacity
+      if (mixWeight <= 1e-4) {
+        continue
+      }
+
+      // factor determines how much this layer's color mixes into the final result
+      // strict stack priority: scaled by (1 - accumWeight)
+      const factor = mixWeight * (1 - accumWeight)
+      if (factor <= 1e-4) {
         continue
       }
 
@@ -709,32 +643,36 @@ function resolveProjectionLayersIntoImageData(outputData, layerSnapshots, width,
       const srcG = layer.pixelData[j + 1]
       const srcB = layer.pixelData[j + 2]
       const [blendR, blendG, blendB] = blendRgbByMode(layer.blendMode, baseR, baseG, baseB, srcR, srcG, srcB)
-      const weight = metrics.weightScore * metrics.weightScore
-      if (weight <= 1e-6) {
-        continue
-      }
 
-      totalWeight += weight
-      accumR += blendR * weight
-      accumG += blendG * weight
-      accumB += blendB * weight
-      accumAlpha += metrics.alpha * weight
+      accumR += blendR * factor
+      accumG += blendG * factor
+      accumB += blendB * factor
+      accumWeight += factor
+      
+      // Use the pure 2D image alpha for the final silhouette opacity, 
+      // avoiding making internal 3D-angle seams semi-transparent!
+      finalMaxOpacity = Math.max(finalMaxOpacity, srcAlpha * clamp01(layer.opacity ?? 1))
     }
 
-    if (totalWeight <= 1e-6) {
-      applySingleLayer(bestLayer)
-      continue
+    if (accumWeight > 0) {
+      // 1. Normalize the color by the accumulated weight.
+      // This mathematically eliminates the "white gradient" caused by overlapping soft seams
+      // because we re-normalize the color instead of letting the checkerboard bleed through the transparency.
+      const r = accumR / accumWeight
+      const g = accumG / accumWeight
+      const b = accumB / accumWeight
+
+      // 2. The final opacity against the checkerboard is simply the strongest 2D alpha.
+      // This guarantees that internal 3D-angle seams never become semi-transparent 
+      // (which is exactly what caused the white checkerboard bleeding).
+      const finalAlpha = Math.min(1.0, finalMaxOpacity)
+      const invAlpha = Math.max(0, 1 - finalAlpha)
+
+      outputData[j] = Math.round(baseR * invAlpha + r * finalAlpha)
+      outputData[j + 1] = Math.round(baseG * invAlpha + g * finalAlpha)
+      outputData[j + 2] = Math.round(baseB * invAlpha + b * finalAlpha)
+      outputData[j + 3] = 255
     }
-
-    const resolvedR = accumR / totalWeight
-    const resolvedG = accumG / totalWeight
-    const resolvedB = accumB / totalWeight
-    const resolvedAlpha = clamp01(accumAlpha / totalWeight)
-
-    outputData[j] = Math.round(baseR * (1 - resolvedAlpha) + resolvedR * resolvedAlpha)
-    outputData[j + 1] = Math.round(baseG * (1 - resolvedAlpha) + resolvedG * resolvedAlpha)
-    outputData[j + 2] = Math.round(baseB * (1 - resolvedAlpha) + resolvedB * resolvedAlpha)
-    outputData[j + 3] = 255
   }
 }
 
@@ -5669,7 +5607,7 @@ export default function MeshEditorPage() {
             texH,
             effectiveBlendPixels
           )
-          const confidenceMap = buildProjectionConfidenceMap(accumulatedWeight, coverageMask)
+          const confidenceMap = buildProjectionConfidenceMap(accumulatedWeight, coverageMask, alphaBytes)
 
           layerData.bakedCanvas = bakedCanvas
           layerData.bakeSignature = bakeSignature
