@@ -1089,7 +1089,9 @@ function buildCoverageBlendWeights(coverageMap, textureWidth, textureHeight, ble
       continue
     }
 
-    weights[i] = Math.max(0, 1 - d / denom)
+    const t = Math.max(0, Math.min(1, 1 - d / denom))
+    // Ease overlap falloff to reduce noisy transitions between projections.
+    weights[i] = t * t * (3 - 2 * t)
   }
 
   return weights
@@ -1374,7 +1376,10 @@ export async function accumulateProjectedPatch({
   binaryMask = false,
   coverageMap = null,
   blendPixels = 0,
-  markCoverage = false
+  markCoverage = false,
+  grazingCoverageThreshold = 0.15,
+  minFacingCos = 0,
+  facingPower = 1.5
 }) {
   if (!root || !camera || !maskCanvas || !bbox || !patchImage || !accumulatedColor || !accumulatedWeight) {
     return { processedSamples: 0, appliedSamples: 0, activePixelCount: 0 }
@@ -1501,10 +1506,25 @@ export async function accumulateProjectedPatch({
         edge2.subVectors(vC, vA)
         triNormal.crossVectors(edge1, edge2)
         viewVec.subVectors(vA, camWorldPos)
-        if (triNormal.dot(viewVec) > 0) {
+        const faceDot = triNormal.dot(viewVec)
+        if (faceDot > 0) {
           processedSamples += 1
           continue
         }
+
+        // Grazing-angle check: near-silhouette triangles are still painted
+        // but NOT marked as covered so that subsequent projections with a
+        // better facing angle can overwrite them (prevents dark seam lines).
+        const nLenSq = triNormal.lengthSq()
+        const vLenSq = viewVec.lengthSq()
+        const isGrazingTriangle = grazingCoverageThreshold > 0
+          && nLenSq > 0 && vLenSq > 0
+          && (faceDot * faceDot) / (nLenSq * vLenSq) < grazingCoverageThreshold * grazingCoverageThreshold
+
+        const facingCos = nLenSq > 0 && vLenSq > 0
+          ? Math.max(0, -faceDot / Math.sqrt(nLenSq * vLenSq))
+          : 0
+        const facingWeight = Math.pow(facingCos, Math.max(1, facingPower))
 
         // Project verts to NDC
         sA.copy(vA).project(camera)
@@ -1569,6 +1589,10 @@ export async function accumulateProjectedPatch({
             }
 
             const pixelIdx = py * textureWidth + px
+            const isPreviouslyCovered = Boolean(coverageMap && coverageMap[pixelIdx] > 0)
+            if (isPreviouslyCovered && facingCos < Math.max(0, minFacingCos)) {
+              continue
+            }
             const coverageWeight = coverageWeights ? coverageWeights[pixelIdx] : 1
             if (coverageWeight <= 1e-6) {
               continue
@@ -1621,7 +1645,8 @@ export async function accumulateProjectedPatch({
                 continue
               }
 
-              const weight = coverageWeight * alphaNorm
+              const angleWeight = isPreviouslyCovered ? facingWeight : 1
+              const weight = coverageWeight * alphaNorm * angleWeight
               accumulatedColor[idx]     = patchData[nearestIdx] * weight
               accumulatedColor[idx + 1] = patchData[nearestIdx + 1] * weight
               accumulatedColor[idx + 2] = patchData[nearestIdx + 2] * weight
@@ -1665,7 +1690,11 @@ export async function accumulateProjectedPatch({
                 continue
               }
 
-              const weight = maskAlpha * clampedViewOpacity * coverageWeight * sampleAlphaNorm
+              const angleWeight = isPreviouslyCovered ? facingWeight : 1
+              const weight = maskAlpha * clampedViewOpacity * coverageWeight * sampleAlphaNorm * angleWeight
+              if (weight <= 0.0025) {
+                continue
+              }
               accumulatedColor[idx]     += sampleR * weight
               accumulatedColor[idx + 1] += sampleG * weight
               accumulatedColor[idx + 2] += sampleB * weight
@@ -1673,7 +1702,7 @@ export async function accumulateProjectedPatch({
               accumulatedWeight[pixelIdx] += weight
             }
 
-            if (touchedCoverage && !touchedCoverage[pixelIdx]) {
+            if (touchedCoverage && !touchedCoverage[pixelIdx] && !isGrazingTriangle) {
               touchedCoverage[pixelIdx] = 1
               touchedCoverageIndices.push(pixelIdx)
             }

@@ -716,6 +716,41 @@ function pickGeneratedTextureAsset(generatedAssets = []) {
   return preferredAsset || generatedAssets[0]
 }
 
+function buildFramedProjectionCamera(sourceCamera, root, aspect = 1) {
+  const projectionCamera = sourceCamera?.clone?.()
+  if (!projectionCamera || !root) {
+    return projectionCamera
+  }
+
+  if ('aspect' in projectionCamera && Number.isFinite(aspect) && aspect > 0) {
+    projectionCamera.aspect = aspect
+  }
+
+  const bounds = new THREE.Box3().setFromObject(root)
+  const sphere = bounds.getBoundingSphere(new THREE.Sphere())
+  const radius = Math.max(sphere?.radius || 1, 1e-3)
+  const center = sphere?.center || new THREE.Vector3()
+  const forward = new THREE.Vector3()
+  projectionCamera.getWorldDirection(forward)
+
+  const verticalFovRad = THREE.MathUtils.degToRad(
+    projectionCamera.getEffectiveFOV?.() || projectionCamera.fov || 50
+  )
+  const horizontalFovRad = 2 * Math.atan(Math.tan(verticalFovRad / 2) * Math.max(0.01, aspect))
+  // Perspective fit uses tan(FOV/2): using sin pushes the camera too far back.
+  const distVertical = radius / Math.max(Math.tan(verticalFovRad / 2), 1e-4)
+  const distHorizontal = radius / Math.max(Math.tan(horizontalFovRad / 2), 1e-4)
+  const framedDistance = Math.max(distVertical, distHorizontal) * 1.03
+
+  projectionCamera.position.copy(center).addScaledVector(forward, -framedDistance)
+  projectionCamera.lookAt(center)
+  projectionCamera.near = Math.max(0.001, framedDistance - radius * 2.2)
+  projectionCamera.far = Math.max(projectionCamera.near + 1, framedDistance + radius * 4)
+  projectionCamera.updateProjectionMatrix?.()
+  projectionCamera.updateMatrixWorld?.(true)
+  return projectionCamera
+}
+
 /**
  * Blend two texture canvases by opacity and add optional noise to the patched region
  * border to help break up seam artifacts. Writes the result into outputCanvas in-place.
@@ -4536,6 +4571,14 @@ export default function MeshEditorPage() {
       const textureContext = textureCanvas.getContext('2d')
       textureContext.clearRect(0, 0, texW, texH)
 
+        const cellSize = Math.max(16, Math.round(texW / 64))
+        for (let cy = 0; cy < texH; cy += cellSize) {
+          for (let cx = 0; cx < texW; cx += cellSize) {
+            textureContext.fillStyle = (((cx / cellSize) + (cy / cellSize)) % 2 === 0) ? '#585858' : '#3a3a3a'
+            textureContext.fillRect(cx, cy, cellSize, cellSize)
+          }
+        }
+
       const visibleLayers = layers.filter(layer => layer.visible !== false)
       for (let layerIndex = 0; layerIndex < visibleLayers.length; layerIndex += 1) {
         if (projectionRebuildTokenRef.current !== rebuildToken) {
@@ -4574,6 +4617,9 @@ export default function MeshEditorPage() {
           blendPixels: layer.blendPixels,
           markCoverage: true,
           binaryMask: false,
+          grazingCoverageThreshold: 0.15,
+          minFacingCos: 0.2,
+          facingPower: 1.75,
           onProgress: progress => {
             const overall = (layerIndex + progress) / Math.max(1, visibleLayers.length)
             setProjectionRebuildProgress(overall)
@@ -4664,6 +4710,16 @@ export default function MeshEditorPage() {
     const textureCtx = textureCanvas.getContext('2d')
     textureCtx.clearRect(0, 0, clampedSize, clampedSize)
 
+    // Paint a checkerboard so unpainted UV areas are visually distinguishable
+    // from textured areas rather than appearing as solid black.
+    const cellSize = Math.max(16, Math.round(clampedSize / 64))
+    for (let cy = 0; cy < clampedSize; cy += cellSize) {
+      for (let cx = 0; cx < clampedSize; cx += cellSize) {
+        textureCtx.fillStyle = (((cx / cellSize) + (cy / cellSize)) % 2 === 0) ? '#585858' : '#3a3a3a'
+        textureCtx.fillRect(cx, cy, cellSize, cellSize)
+      }
+    }
+
     if (texturableMesh.maskCanvas) {
       texturableMesh.maskCanvas.width = clampedSize
       texturableMesh.maskCanvas.height = clampedSize
@@ -4722,10 +4778,7 @@ export default function MeshEditorPage() {
       setError('')
       setFeedback('Capturing position view...')
 
-      const projectionCamera = cameraRef.current.clone()
-      projectionCamera.aspect = 1
-      projectionCamera.updateProjectionMatrix?.()
-      projectionCamera.updateMatrixWorld?.(true)
+      const projectionCamera = buildFramedProjectionCamera(cameraRef.current, texturableMesh.root, 1)
 
       const viewCanvas = captureTexturedMeshView({
         root: texturableMesh.root,
