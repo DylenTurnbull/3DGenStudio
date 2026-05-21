@@ -19,6 +19,19 @@ const STATUS_MAP = {
 
 const CHANGE_LOG_ENTRIES = [
   {
+    version: 'v0.9.1',
+    date: '2026-05-21',
+    items: [
+      'Kanban Page: Fixed bug of Untitled asset because of ComfyUI crash',
+			'Workflows: Fixed bug of the output not respected',
+			'Kanban Page: Fixed bug, in case of success of ComfyUI without anything returned',
+			'Kanban Page: Added Edit button to open the Mesh Editor for a mesh',
+			'Kanban Page: Cards are unblocked at startup',
+			'Graph Page: Fixed bug -> some workflows were not available in the dropdown',
+			'MeshEditor/MeshPreview: Added a Albedo/PBR button'
+    ],
+  },
+  {
     version: 'v0.9.0',
     date: '2026-05-20',
     items: [
