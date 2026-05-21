@@ -21,6 +21,7 @@ import {
   createTask,
   createWorkflowRecord,
   clearCardProcessingState,
+  clearStaleProcessingCards,
   deleteCard,
   deleteCardAttribute,
   deleteAssetEditByFilePath,
@@ -5465,7 +5466,18 @@ app.get('/api/system/stats', async (req, res) => {
 });
 
 // Start server
-initializeStorage().then(() => {
+initializeStorage().then(async () => {
+  try {
+    const cleared = await clearStaleProcessingCards({
+      preservedSources: ['Tencent Cloud', 'Tripo AI']
+    });
+    if (cleared > 0) {
+      console.log(`🧹 Cleared ${cleared} stale processing card(s) on startup`);
+    }
+  } catch (err) {
+    console.warn('Failed to clear stale processing cards on startup:', err.message);
+  }
+
   app.listen(PORT, () => {
     console.log(`🚀 3D Gen Studio Backend running at http://localhost:${PORT}`);
     console.log(`📁 Local Workspace: ${DATA_DIR}`);

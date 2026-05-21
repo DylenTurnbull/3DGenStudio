@@ -1855,6 +1855,37 @@ export async function setCardProcessingState(projectId, externalCardId, {
   return mapProjectCardRow(await getCardRow(projectId, card.clientKey || card.id));
 }
 
+export async function clearStaleProcessingCards({ preservedSources = [] } = {}) {
+  const db = await getDb();
+  const rows = await all(
+    db,
+    `SELECT id, projectId, name, metadata FROM Cards WHERE status = 'processing'`
+  );
+
+  const preserved = new Set(preservedSources.map(value => String(value).toLowerCase()));
+  let clearedCount = 0;
+
+  for (const row of rows) {
+    const metadata = parseJson(row.metadata, {});
+    const source = String(metadata?.processing?.source || '').toLowerCase();
+
+    if (preserved.has(source)) {
+      continue;
+    }
+
+    const nextMetadata = buildNextCardMetadata(metadata, null);
+
+    await run(
+      db,
+      `UPDATE Cards SET status = NULL, progress = NULL, metadata = ? WHERE id = ?`,
+      [JSON.stringify(nextMetadata), row.id]
+    );
+    clearedCount += 1;
+  }
+
+  return clearedCount;
+}
+
 export async function clearCardProcessingState(projectId, externalCardId, {
   name,
   status = null,
