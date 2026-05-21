@@ -6,6 +6,7 @@ export default function MeshPreviewDialog({ asset, titleId = 'mesh-preview-dialo
   const [showNormals, setShowNormals] = useState(false)
   const [showGrid, setShowGrid] = useState(true)
   const [showShadows, setShowShadows] = useState(false)
+  const [showAlbedo, setShowAlbedo] = useState(false)
   const [showLightSlider, setShowLightSlider] = useState(false)
   const [lightIntensity, setLightIntensity] = useState(2.2)
 
@@ -33,6 +34,15 @@ export default function MeshPreviewDialog({ asset, titleId = 'mesh-preview-dialo
                 title="Toggle normal material"
               >
                 N
+              </button>
+              <button
+                type="button"
+                className={`mesh-preview-dialog__tool ${showAlbedo ? 'mesh-preview-dialog__tool--active' : ''}`}
+                onClick={() => setShowAlbedo(current => !current)}
+                aria-pressed={showAlbedo}
+                title="Toggle albedo (unlit) / PBR"
+              >
+                A
               </button>
               <button
                 type="button"
@@ -80,6 +90,7 @@ export default function MeshPreviewDialog({ asset, titleId = 'mesh-preview-dialo
               showNormals={showNormals}
               showGrid={showGrid}
               showShadows={showShadows}
+              showAlbedo={showAlbedo}
               lightIntensity={lightIntensity}
               fitMode="center"
             />

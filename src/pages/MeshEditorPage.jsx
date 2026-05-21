@@ -1929,7 +1929,7 @@ function CameraRig({ geometry, frameKey, onCameraReady, controlsEnabled = true, 
   )
 }
 
-function EditorMesh({ geometry, selectedFaceIndices, selectedVertexIndices, showShadows = false }) {
+function EditorMesh({ geometry, selectedFaceIndices, selectedVertexIndices, showShadows = false, showAlbedo = false }) {
   const faceSelectionGeometry = useMemo(() => getFaceSelectionGeometry(geometry, selectedFaceIndices), [geometry, selectedFaceIndices])
   const selectedVertexPositions = useMemo(() => getVertexSelectionPositions(geometry, selectedVertexIndices), [geometry, selectedVertexIndices])
   const selectedVertexVectors = useMemo(() => {
@@ -1951,7 +1951,9 @@ function EditorMesh({ geometry, selectedFaceIndices, selectedVertexIndices, show
   return (
     <group>
       <mesh geometry={geometry} castShadow={showShadows} receiveShadow={showShadows}>
-        <meshStandardMaterial color="#a9b6ff" metalness={0.08} roughness={0.62} />
+        {showAlbedo
+          ? <meshBasicMaterial color="#a9b6ff" />
+          : <meshStandardMaterial color="#a9b6ff" metalness={0.08} roughness={0.62} />}
       </mesh>
       <mesh geometry={geometry}>
         <meshBasicMaterial color="#ffffff" wireframe transparent opacity={0.36} />
@@ -2108,7 +2110,7 @@ function BooleanPreviewMesh({
   )
 }
 
-function TexturedMesh({ root, textureKey, displayTexture, showShadows = false }) {
+function TexturedMesh({ root, textureKey, displayTexture, showShadows = false, showAlbedo = false }) {
   const baseObject = useMemo(() => {
     if (!root || !displayTexture) {
       return null
@@ -2116,6 +2118,40 @@ function TexturedMesh({ root, textureKey, displayTexture, showShadows = false })
 
     const object = root.clone(true)
     const materials = []
+
+    const buildMaterial = sourceMaterial => {
+      const isTargetTexture = sourceMaterial && getTextureKeyFromMaterial(sourceMaterial) === textureKey
+
+      if (showAlbedo) {
+        const params = {}
+        if (sourceMaterial?.color?.isColor) {
+          params.color = sourceMaterial.color.clone()
+        } else if (sourceMaterial?.color) {
+          params.color = new THREE.Color(sourceMaterial.color)
+        } else {
+          params.color = new THREE.Color('#ffffff')
+        }
+        const albedoMap = isTargetTexture ? displayTexture : (sourceMaterial?.map || null)
+        if (albedoMap) {
+          params.map = albedoMap
+        }
+        if (sourceMaterial?.transparent) {
+          params.transparent = true
+          params.opacity = sourceMaterial.opacity ?? 1
+        }
+        if (typeof sourceMaterial?.side === 'number') {
+          params.side = sourceMaterial.side
+        }
+        return new THREE.MeshBasicMaterial(params)
+      }
+
+      const nextMaterial = sourceMaterial?.clone?.() || sourceMaterial
+      if (nextMaterial && isTargetTexture) {
+        nextMaterial.map = displayTexture
+        nextMaterial.needsUpdate = true
+      }
+      return nextMaterial
+    }
 
     object.traverse(child => {
       if (!child.isMesh) {
@@ -2127,11 +2163,7 @@ function TexturedMesh({ root, textureKey, displayTexture, showShadows = false })
 
       if (Array.isArray(child.material)) {
         child.material = child.material.map(material => {
-          const nextMaterial = material?.clone?.() || material
-          if (nextMaterial && getTextureKeyFromMaterial(material) === textureKey) {
-            nextMaterial.map = displayTexture
-            nextMaterial.needsUpdate = true
-          }
+          const nextMaterial = buildMaterial(material)
           if (nextMaterial) {
             materials.push(nextMaterial)
           }
@@ -2140,11 +2172,7 @@ function TexturedMesh({ root, textureKey, displayTexture, showShadows = false })
         return
       }
 
-      const nextMaterial = child.material?.clone?.() || child.material
-      if (nextMaterial && getTextureKeyFromMaterial(child.material) === textureKey) {
-        nextMaterial.map = displayTexture
-        nextMaterial.needsUpdate = true
-      }
+      const nextMaterial = buildMaterial(child.material)
       child.material = nextMaterial
       if (nextMaterial) {
         materials.push(nextMaterial)
@@ -2153,7 +2181,7 @@ function TexturedMesh({ root, textureKey, displayTexture, showShadows = false })
 
     object.userData.meshEditorMaterials = materials
     return object
-  }, [displayTexture, root, showShadows, textureKey])
+  }, [displayTexture, root, showAlbedo, showShadows, textureKey])
 
   useEffect(() => () => {
     baseObject?.userData?.meshEditorMaterials?.forEach(material => material?.dispose?.())
@@ -2641,6 +2669,7 @@ export default function MeshEditorPage() {
 
   const [showSettings, setShowSettings] = useState(false)
   const [showShadows, setShowShadows] = useState(false)
+  const [showAlbedo, setShowAlbedo] = useState(false)
   const [activeMenu, setActiveMenu] = useState('modeling')
   const [geometry, setGeometry] = useState(null)
   const [texturableMesh, setTexturableMesh] = useState(null)
@@ -6912,6 +6941,15 @@ export default function MeshEditorPage() {
                 >
                   {showShadows ? 'Shadows on' : 'Shadows off'}
                 </button>
+                <button
+                  type="button"
+                  className={`mesh-editor-btn ${showAlbedo ? 'mesh-editor-btn--secondary' : 'mesh-editor-btn--ghost'}`}
+                  onClick={() => setShowAlbedo(current => !current)}
+                  aria-pressed={showAlbedo}
+                  title="Toggle albedo (unlit) / PBR shading"
+                >
+                  {showAlbedo ? 'Albedo' : 'PBR'}
+                </button>
               </div>
             </div>
             <div className="mesh-editor-toolbar__stats">
@@ -7993,6 +8031,7 @@ export default function MeshEditorPage() {
                         textureKey={texturableMesh.textureKey}
                         displayTexture={displayTextureRef.current}
                         showShadows={showShadows}
+                        showAlbedo={showAlbedo}
                       />
                     ) : activeMenu === 'boolean' && booleanHasPreview && booleanMaskTexture ? (
                       <BooleanPreviewMesh
@@ -8015,6 +8054,7 @@ export default function MeshEditorPage() {
                         selectedFaceIndices={activeMenu === 'modeling' ? selectedFaceIndices : []}
                         selectedVertexIndices={activeMenu === 'modeling' ? selectedVertexIndices : []}
                         showShadows={showShadows}
+                        showAlbedo={showAlbedo}
                       />
                     )}
                     {activeMenu === 'boolean' && booleanHasPreview && (!booleanMaskTexture || booleanPlaceMode) && (

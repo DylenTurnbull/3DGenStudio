@@ -120,7 +120,29 @@ function loadWithLoader(loader, url) {
   })
 }
 
-function applyDisplayMaterial(object, showNormals, showShadows) {
+function buildAlbedoMaterial(sourceMaterial) {
+  const params = {}
+  if (sourceMaterial?.color?.isColor) {
+    params.color = sourceMaterial.color.clone()
+  } else if (sourceMaterial?.color) {
+    params.color = new THREE.Color(sourceMaterial.color)
+  } else {
+    params.color = new THREE.Color('#ffffff')
+  }
+  if (sourceMaterial?.map) {
+    params.map = sourceMaterial.map
+  }
+  if (sourceMaterial?.transparent) {
+    params.transparent = true
+    params.opacity = sourceMaterial.opacity ?? 1
+  }
+  if (typeof sourceMaterial?.side === 'number') {
+    params.side = sourceMaterial.side
+  }
+  return new THREE.MeshBasicMaterial(params)
+}
+
+function applyDisplayMaterial(object, showNormals, showShadows, showAlbedo) {
   object?.traverse(child => {
     if (!child.isMesh) {
       return
@@ -139,6 +161,20 @@ function applyDisplayMaterial(object, showNormals, showShadows) {
       }
 
       child.material = child.userData.normalMat
+      return
+    }
+
+    if (showAlbedo) {
+      if (!child.userData.albedoMat) {
+        const source = child.userData.originalMat
+        if (Array.isArray(source)) {
+          child.userData.albedoMat = source.map(buildAlbedoMaterial)
+        } else {
+          child.userData.albedoMat = buildAlbedoMaterial(source)
+        }
+      }
+
+      child.material = child.userData.albedoMat
       return
     }
 
@@ -212,6 +248,7 @@ export default function Viewer({
   showNormals = false,
   showGrid = true,
   showShadows = true,
+  showAlbedo = false,
   lightIntensity = 2.2,
   fitMode = 'ground'
 }) {
@@ -256,9 +293,9 @@ export default function Viewer({
     }
 
     const modelClone = modelState.object.clone(true)
-    applyDisplayMaterial(modelClone, showNormals, showShadows)
+    applyDisplayMaterial(modelClone, showNormals, showShadows, showAlbedo)
     return modelClone
-  }, [modelState, modelUrl, showNormals, showShadows])
+  }, [modelState, modelUrl, showNormals, showShadows, showAlbedo])
 
   const cameraTarget = modelState?.modelUrl === modelUrl ? modelState.target : new THREE.Vector3(0, 0.75, 0)
   const cameraPosition = modelState?.modelUrl === modelUrl ? modelState.cameraPosition : new THREE.Vector3(3, 3, 5)
@@ -300,7 +337,7 @@ export default function Viewer({
               />
             )}
         </Suspense>
-        <Environment preset="night" />
+        <Environment preset="studio" />
         <CameraController autoRotate={!modelUrl} target={cameraTarget} cameraPosition={cameraPosition} />
       </Canvas>
     </div>

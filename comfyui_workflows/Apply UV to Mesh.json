@@ -43,8 +43,14 @@
   },
   "4": {
     "inputs": {
-      "width": 1024,
-      "height": 1024,
+      "width": [
+        "9",
+        0
+      ],
+      "height": [
+        "9",
+        0
+      ],
       "batch_size": 1,
       "color": 16777215
     },
@@ -58,7 +64,7 @@
       "filename_prefix": "MeshWithUV",
       "file_format": "glb",
       "trimesh": [
-        "3",
+        "8",
         0
       ]
     },
@@ -78,6 +84,50 @@
     "class_type": "Preview3D",
     "_meta": {
       "title": "Preview 3D & Animation"
+    }
+  },
+  "7": {
+    "inputs": {
+      "width": [
+        "9",
+        0
+      ],
+      "height": [
+        "9",
+        0
+      ],
+      "batch_size": 1,
+      "color": 16777215
+    },
+    "class_type": "EmptyImage",
+    "_meta": {
+      "title": "EmptyImage"
+    }
+  },
+  "8": {
+    "inputs": {
+      "texture": "metallic_roughness",
+      "trimesh": [
+        "3",
+        0
+      ],
+      "image": [
+        "7",
+        0
+      ]
+    },
+    "class_type": "Hy3DSetMeshPBRTextures",
+    "_meta": {
+      "title": "Hy3D Set Mesh PBR Textures"
+    }
+  },
+  "9": {
+    "inputs": {
+      "value": 2048
+    },
+    "class_type": "PrimitiveInt",
+    "_meta": {
+      "title": "Texture Resolution"
     }
   }
 }
