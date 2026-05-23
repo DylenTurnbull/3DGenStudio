@@ -4300,6 +4300,14 @@ export default function MeshEditorPage() {
         }
       }
 
+      if (type === 'textured-view') {
+        for (const [id, config] of Object.entries(next)) {
+          if (config.type === 'textured-view' && id !== paramId) {
+            next[id] = { type: 'none' }
+          }
+        }
+      }
+
       if (type === 'asset') {
         next[paramId] = {
           type: 'asset',
@@ -6374,6 +6382,8 @@ export default function MeshEditorPage() {
     }
 
     const [positionViewParamId] = positionViewParam
+    const texturedViewParam = viewParamEntries.find(([, config]) => config?.type === 'textured-view')
+    const texturedViewParamId = texturedViewParam?.[0] || null
     const staticImageParams = viewParamEntries.filter(([, config]) => config?.type === 'asset' || config?.type === 'file')
     const texW = texturableMesh.textureCanvas.width
     const texH = texturableMesh.textureCanvas.height
@@ -6396,6 +6406,21 @@ export default function MeshEditorPage() {
         renderMode: 'lit-geometry'
       })
       const positionViewFile = await canvasToFile(viewCanvas, 'projection-position-view.png')
+
+      let texturedViewFile = null
+      if (texturedViewParamId) {
+        setFeedback('Capturing textured view...')
+        const texturedViewCanvas = captureTexturedMeshView({
+          root: texturableMesh.root,
+          textureKey: texturableMesh.textureKey,
+          displayTexture: displayTextureRef.current,
+          camera: projectionCamera,
+          width: sendResolution,
+          height: sendResolution,
+          renderMode: 'textured'
+        })
+        texturedViewFile = await canvasToFile(texturedViewCanvas, 'projection-textured-view.png')
+      }
 
       const staticFiles = {}
       for (const [paramId, config] of staticImageParams) {
@@ -6423,7 +6448,8 @@ export default function MeshEditorPage() {
       const workflowInputs = {
         ...projectionWorkflowInputs,
         ...staticFiles,
-        [positionViewParamId]: positionViewFile
+        [positionViewParamId]: positionViewFile,
+        ...(texturedViewFile ? { [texturedViewParamId]: texturedViewFile } : {})
       }
 
       const promptId = createExecutionId('mesh-projection-prompt')
@@ -7662,6 +7688,7 @@ export default function MeshEditorPage() {
                                   >
                                     <option value="none">— Not used —</option>
                                     <option value="position-view">Use as Position View</option>
+                                    <option value="textured-view">Use as Textured View</option>
                                     <option value="asset">From assets</option>
                                     <option value="file">From computer</option>
                                   </select>
