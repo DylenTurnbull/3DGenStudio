@@ -2674,6 +2674,7 @@ export default function MeshEditorPage() {
   const [geometry, setGeometry] = useState(null)
   const [texturableMesh, setTexturableMesh] = useState(null)
   const [textureRevision, setTextureRevision] = useState(0)
+  const [contextRevision, setContextRevision] = useState(0)
   const [comfyLoading, setComfyLoading] = useState(false)
   const [comfyWorkflows, setComfyWorkflows] = useState([])
   const [textureWorkflowId, setTextureWorkflowId] = useState('')
@@ -8152,7 +8153,26 @@ export default function MeshEditorPage() {
                 </div>
               ) : geometry ? (
                 <>
-                  <Canvas shadows={showShadows ? { type: THREE.PCFSoftShadowMap } : false} resize={{ offsetSize: true }} style={{ width: '100%', height: '100%' }} gl={{ powerPreference: 'high-performance' }}>
+                  <Canvas
+                    key={contextRevision}
+                    shadows={showShadows ? { type: THREE.PCFSoftShadowMap } : false}
+                    resize={{ offsetSize: true }}
+                    style={{ width: '100%', height: '100%' }}
+                    gl={{ powerPreference: 'high-performance' }}
+                    onCreated={({ gl }) => {
+                      const canvas = gl.domElement
+                      const handleLost = (event) => {
+                        event.preventDefault()
+                        console.warn('WebGL context lost — awaiting restore.')
+                      }
+                      const handleRestored = () => {
+                        console.warn('WebGL context restored — rebuilding scene.')
+                        setContextRevision(rev => rev + 1)
+                      }
+                      canvas.addEventListener('webglcontextlost', handleLost, false)
+                      canvas.addEventListener('webglcontextrestored', handleRestored, false)
+                    }}
+                  >
                     <PerspectiveCamera makeDefault position={[3, 3, 5]} near={0.0001} far={4000} />
                     <ambientLight intensity={1.25} />
                     <directionalLight

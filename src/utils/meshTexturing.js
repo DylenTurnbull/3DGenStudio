@@ -28,6 +28,35 @@ let sharedDepthPrepassTarget = null
 let sharedDepthPrepassMaterial = null
 let sharedDepthPrepassPixels = null
 
+let sharedProjectionRenderer = null
+let sharedMaskProjectionRenderer = null
+
+function getSharedProjectionRenderer() {
+  if (!sharedProjectionRenderer) {
+    sharedProjectionRenderer = new THREE.WebGLRenderer({
+      antialias: true,
+      alpha: true,
+      preserveDrawingBuffer: true,
+      powerPreference: 'high-performance'
+    })
+    sharedProjectionRenderer.setPixelRatio(1)
+  }
+  return sharedProjectionRenderer
+}
+
+function getSharedMaskProjectionRenderer() {
+  if (!sharedMaskProjectionRenderer) {
+    sharedMaskProjectionRenderer = new THREE.WebGLRenderer({
+      antialias: false,
+      alpha: true,
+      preserveDrawingBuffer: true,
+      powerPreference: 'high-performance'
+    })
+    sharedMaskProjectionRenderer.setPixelRatio(1)
+  }
+  return sharedMaskProjectionRenderer
+}
+
 function getDepthPrepassResources(width, height) {
   const safeWidth = Math.max(1, Math.round(width || 1))
   const safeHeight = Math.max(1, Math.round(height || 1))
@@ -968,14 +997,9 @@ export function captureTexturedMeshView({
     ? createLitGeometryRenderClone(root)
     : createTexturedRenderClone(root, textureKey, displayTexture)
   const scene = createProjectionScene(object)
-  const renderer = new THREE.WebGLRenderer({
-    antialias: true,
-    alpha: false,
-    preserveDrawingBuffer: true
-  })
+  const renderer = getSharedProjectionRenderer()
 
   try {
-    renderer.setPixelRatio(1)
     // Render Three.js natively at the high-res dimensions
     renderer.setSize(renderWidth, renderHeight, false)
     renderer.outputColorSpace = displayTexture.colorSpace || THREE.SRGBColorSpace
@@ -989,10 +1013,9 @@ export function captureTexturedMeshView({
     // Draw 1:1 mapping (no stretching, perfect pixel quality)
     const context = targetContext || createCanvas(width, height).getContext('2d')
     context.drawImage(renderer.domElement, 0, 0, renderWidth, renderHeight)
-    
+
     return context.canvas
   } finally {
-    renderer.dispose()
     dispose()
   }
 }
@@ -1457,10 +1480,9 @@ export function captureTextureMaskScreenView({
   scene.add(object)
 
   const projectionCamera = createProjectionRenderCamera(camera, width / height)
-  const renderer = new THREE.WebGLRenderer({ antialias: false, alpha: true, preserveDrawingBuffer: true })
+  const renderer = getSharedMaskProjectionRenderer()
 
   try {
-    renderer.setPixelRatio(1)
     renderer.setSize(width, height, false)
     renderer.setClearColor(0x000000, 0)
     renderer.render(scene, projectionCamera)
@@ -1469,7 +1491,6 @@ export function captureTextureMaskScreenView({
     canvas.getContext('2d').drawImage(renderer.domElement, 0, 0, width, height)
     return canvas
   } finally {
-    renderer.dispose()
     materials.forEach(mat => mat.dispose())
     maskTexture.dispose()
   }
