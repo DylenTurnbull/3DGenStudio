@@ -4308,6 +4308,14 @@ export default function MeshEditorPage() {
         }
       }
 
+      if (type === 'untextured-view') {
+        for (const [id, config] of Object.entries(next)) {
+          if (config.type === 'untextured-view' && id !== paramId) {
+            next[id] = { type: 'none' }
+          }
+        }
+      }
+
       if (type === 'asset') {
         next[paramId] = {
           type: 'asset',
@@ -6384,6 +6392,8 @@ export default function MeshEditorPage() {
     const [positionViewParamId] = positionViewParam
     const texturedViewParam = viewParamEntries.find(([, config]) => config?.type === 'textured-view')
     const texturedViewParamId = texturedViewParam?.[0] || null
+    const untexturedViewParam = viewParamEntries.find(([, config]) => config?.type === 'untextured-view')
+    const untexturedViewParamId = untexturedViewParam?.[0] || null
     const staticImageParams = viewParamEntries.filter(([, config]) => config?.type === 'asset' || config?.type === 'file')
     const texW = texturableMesh.textureCanvas.width
     const texH = texturableMesh.textureCanvas.height
@@ -6408,7 +6418,8 @@ export default function MeshEditorPage() {
       const positionViewFile = await canvasToFile(viewCanvas, 'projection-position-view.png')
 
       let texturedViewFile = null
-      if (texturedViewParamId) {
+      let untexturedViewFile = null
+      if (texturedViewParamId || untexturedViewParamId) {
         setFeedback('Capturing textured view...')
         const texturedViewCanvas = captureTexturedMeshView({
           root: texturableMesh.root,
@@ -6419,7 +6430,110 @@ export default function MeshEditorPage() {
           height: sendResolution,
           renderMode: 'textured'
         })
-        texturedViewFile = await canvasToFile(texturedViewCanvas, 'projection-textured-view.png')
+
+        // Build a UV-space union of all visible projection layer coverage masks.
+        // Covered texels are white, uncovered black. We render this through the
+        // same camera to get a per-pixel covered/uncovered classifier in screen
+        // space, then use it as an alpha mask on the textured view.
+        const coverageCanvas = document.createElement('canvas')
+        coverageCanvas.width = texW
+        coverageCanvas.height = texH
+        const coverageCtx = coverageCanvas.getContext('2d')
+        coverageCtx.fillStyle = '#000000'
+        coverageCtx.fillRect(0, 0, texW, texH)
+        const coverageImage = coverageCtx.getImageData(0, 0, texW, texH)
+        const coverageData = coverageImage.data
+        let hasAnyCoverage = false
+        for (const layer of projectionLayers) {
+          if (layer?.visible === false) continue
+          const data = projectionLayerDataRef.current.get(layer.id)
+          if (!data?.coverageMask || data.coverageMask.length !== texW * texH) continue
+          hasAnyCoverage = true
+          for (let i = 0; i < data.coverageMask.length; i += 1) {
+            if (data.coverageMask[i] > 0) {
+              coverageData[i * 4] = 255
+              coverageData[i * 4 + 1] = 255
+              coverageData[i * 4 + 2] = 255
+              coverageData[i * 4 + 3] = 255
+            }
+          }
+        }
+
+        const renderMaskFromUVCanvas = (uvCanvas) => {
+          const tex = createCanvasTexture(uvCanvas, texturableMesh.textureConfig)
+          try {
+            return captureTexturedMeshView({
+              root: texturableMesh.root,
+              textureKey: texturableMesh.textureKey,
+              displayTexture: tex,
+              camera: projectionCamera,
+              width: sendResolution,
+              height: sendResolution,
+              renderMode: 'textured'
+            })
+          } finally {
+            tex.dispose?.()
+          }
+        }
+
+        // Threshold the mask render's brightness against the dark scene background
+        // (#0b0d12 ≈ 11) so off-mesh and the inverse-classified surface both
+        // become fully transparent.
+        const composeMaskedView = (maskRenderCanvas) => {
+          const composedCanvas = document.createElement('canvas')
+          composedCanvas.width = sendResolution
+          composedCanvas.height = sendResolution
+          const composedCtx = composedCanvas.getContext('2d')
+          composedCtx.drawImage(texturedViewCanvas, 0, 0)
+          const composed = composedCtx.getImageData(0, 0, sendResolution, sendResolution)
+          const maskPixels = maskRenderCanvas.getContext('2d').getImageData(0, 0, sendResolution, sendResolution).data
+          for (let i = 0; i < composed.data.length; i += 4) {
+            composed.data[i + 3] = maskPixels[i] > 64 ? 255 : 0
+          }
+          composedCtx.putImageData(composed, 0, 0)
+          return composedCanvas
+        }
+
+        if (hasAnyCoverage) {
+          coverageCtx.putImageData(coverageImage, 0, 0)
+
+          if (texturedViewParamId) {
+            const maskedTextured = composeMaskedView(renderMaskFromUVCanvas(coverageCanvas))
+            texturedViewFile = await canvasToFile(maskedTextured, 'projection-textured-view.png')
+          }
+
+          if (untexturedViewParamId) {
+            setFeedback('Capturing untextured view...')
+            // Invert: covered → black, uncovered → white. Off-mesh stays as
+            // scene background (~11) and is rejected by the same threshold.
+            const invertedCanvas = document.createElement('canvas')
+            invertedCanvas.width = texW
+            invertedCanvas.height = texH
+            const invertedCtx = invertedCanvas.getContext('2d')
+            const invertedImage = invertedCtx.createImageData(texW, texH)
+            const invertedData = invertedImage.data
+            for (let i = 0; i < coverageData.length; i += 4) {
+              const v = coverageData[i] > 0 ? 0 : 255
+              invertedData[i] = v
+              invertedData[i + 1] = v
+              invertedData[i + 2] = v
+              invertedData[i + 3] = 255
+            }
+            invertedCtx.putImageData(invertedImage, 0, 0)
+            const maskedUntextured = composeMaskedView(renderMaskFromUVCanvas(invertedCanvas))
+            untexturedViewFile = await canvasToFile(maskedUntextured, 'projection-untextured-view.png')
+          }
+        } else {
+          // No projection coverage yet: by definition the whole mesh is
+          // "untextured" and nothing is "textured". Send the full view as the
+          // fallback for whichever input is configured.
+          if (texturedViewParamId) {
+            texturedViewFile = await canvasToFile(texturedViewCanvas, 'projection-textured-view.png')
+          }
+          if (untexturedViewParamId) {
+            untexturedViewFile = await canvasToFile(texturedViewCanvas, 'projection-untextured-view.png')
+          }
+        }
       }
 
       const staticFiles = {}
@@ -6449,7 +6563,8 @@ export default function MeshEditorPage() {
         ...projectionWorkflowInputs,
         ...staticFiles,
         [positionViewParamId]: positionViewFile,
-        ...(texturedViewFile ? { [texturedViewParamId]: texturedViewFile } : {})
+        ...(texturedViewFile ? { [texturedViewParamId]: texturedViewFile } : {}),
+        ...(untexturedViewFile ? { [untexturedViewParamId]: untexturedViewFile } : {})
       }
 
       const promptId = createExecutionId('mesh-projection-prompt')
@@ -7689,6 +7804,7 @@ export default function MeshEditorPage() {
                                     <option value="none">— Not used —</option>
                                     <option value="position-view">Use as Position View</option>
                                     <option value="textured-view">Use as Textured View</option>
+                                    <option value="untextured-view">Use as Untextured View</option>
                                     <option value="asset">From assets</option>
                                     <option value="file">From computer</option>
                                   </select>

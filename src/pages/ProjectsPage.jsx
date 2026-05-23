@@ -19,6 +19,13 @@ const STATUS_MAP = {
 
 const CHANGE_LOG_ENTRIES = [
   {
+    version: 'v0.9.2',
+    date: '2026-05-23',
+    items: [
+			'Mesh Editor: In Projection mode, can send Textured/Untextured view to ComfyUI'
+    ],
+  },
+  {
     version: 'v0.9.1',
     date: '2026-05-21',
     items: [
