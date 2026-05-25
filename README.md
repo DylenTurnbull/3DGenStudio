@@ -10,7 +10,7 @@
 
 *Orchestrate complete 3D generation pipelines — from text-to-image, image editing, mesh generation, UV unwrapping, to texturing — all in a single visual workspace powered by ComfyUI and external APIs.*
 
-[**Website**](https://www.3dgenstudio.com) • [**Report Bug**](https://github.com/visualbruno/3DGenStudio/issues) • [**Discord**](https://discord.gg/hNeV887f)
+[**Website**](https://www.3dgenstudio.com) • [**Report Bug**](https://github.com/visualbruno/3DGenStudio/issues) • [**Discord**](https://discord.gg/KVAAwKytQc)
 </div>
 
 ---
