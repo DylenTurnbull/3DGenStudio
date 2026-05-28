@@ -21,6 +21,14 @@ const STATUS_MAP = {
 
 const CHANGE_LOG_ENTRIES = [
   {
+    version: 'v1.0.0',
+    date: '2026-05-29',
+    items: [
+			'Initial Setup: Download the models and configure automatically the workflows',
+			'Wiki: First version of a documentation'
+    ],
+  },
+  {
     version: 'v0.9.2',
     date: '2026-05-23',
     items: [

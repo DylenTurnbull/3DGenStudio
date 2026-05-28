@@ -1,0 +1,139 @@
+{
+  "pages": [
+    {
+      "id": 1,
+      "parentId": null,
+      "title": "Getting Started",
+      "icon": "rocket_launch",
+      "position": 0,
+      "createdAt": 1780000170819,
+      "updatedAt": 1780000170819
+    },
+    {
+      "id": 6,
+      "parentId": 5,
+      "title": "Images",
+      "icon": "image",
+      "position": 0,
+      "createdAt": 1780000170819,
+      "updatedAt": 1780000170819
+    },
+    {
+      "id": 11,
+      "parentId": 10,
+      "title": "Image Editor",
+      "icon": "photo_filter",
+      "position": 0,
+      "createdAt": 1780000170819,
+      "updatedAt": 1780000170819
+    },
+    {
+      "id": 14,
+      "parentId": 13,
+      "title": "APIs",
+      "icon": "vpn_key",
+      "position": 0,
+      "createdAt": 1780000170819,
+      "updatedAt": 1780000170819
+    },
+    {
+      "id": 2,
+      "parentId": null,
+      "title": "Projects",
+      "icon": "folder_special",
+      "position": 1,
+      "createdAt": 1780000170819,
+      "updatedAt": 1780001378455
+    },
+    {
+      "id": 3,
+      "parentId": 2,
+      "title": "Kanban Board",
+      "icon": "view_kanban",
+      "position": 1,
+      "createdAt": 1780000170819,
+      "updatedAt": 1780000170819
+    },
+    {
+      "id": 7,
+      "parentId": 5,
+      "title": "Meshes",
+      "icon": "deployed_code",
+      "position": 1,
+      "createdAt": 1780000170819,
+      "updatedAt": 1780000170819
+    },
+    {
+      "id": 12,
+      "parentId": 10,
+      "title": "Mesh Editor",
+      "icon": "view_in_ar",
+      "position": 1,
+      "createdAt": 1780000170819,
+      "updatedAt": 1780000170819
+    },
+    {
+      "id": 15,
+      "parentId": 13,
+      "title": "ComfyUI",
+      "icon": "lan",
+      "position": 1,
+      "createdAt": 1780000170819,
+      "updatedAt": 1780000170819
+    },
+    {
+      "id": 4,
+      "parentId": 2,
+      "title": "Graph Page",
+      "icon": "account_tree",
+      "position": 2,
+      "createdAt": 1780000170819,
+      "updatedAt": 1780000170819
+    },
+    {
+      "id": 5,
+      "parentId": null,
+      "title": "Assets",
+      "icon": "inventory_2",
+      "position": 2,
+      "createdAt": 1780000170819,
+      "updatedAt": 1780000170819
+    },
+    {
+      "id": 8,
+      "parentId": 5,
+      "title": "Brushes",
+      "icon": "brush",
+      "position": 2,
+      "createdAt": 1780000170819,
+      "updatedAt": 1780000170819
+    },
+    {
+      "id": 9,
+      "parentId": 5,
+      "title": "Workflows",
+      "icon": "schema",
+      "position": 3,
+      "createdAt": 1780000170819,
+      "updatedAt": 1780000170819
+    },
+    {
+      "id": 10,
+      "parentId": null,
+      "title": "Editors",
+      "icon": "edit_square",
+      "position": 3,
+      "createdAt": 1780000170819,
+      "updatedAt": 1780000170819
+    },
+    {
+      "id": 13,
+      "parentId": null,
+      "title": "Settings",
+      "icon": "settings",
+      "position": 4,
+      "createdAt": 1780000170819,
+      "updatedAt": 1780000170819
+    }
+  ]
+}

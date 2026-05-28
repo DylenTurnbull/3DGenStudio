@@ -6,7 +6,7 @@ import { Buffer } from 'buffer';
 import { randomUUID } from 'crypto';
 import { createAssetEditRecord, createBrushChildRecord, resolveProjectImageSource, resolveProjectMeshSource } from './storage.js';
 import fs from 'fs/promises';
-import { createWriteStream } from 'node:fs';
+import { createWriteStream, existsSync } from 'node:fs';
 import { spawn } from 'node:child_process';
 import process from 'node:process';
 import { fileURLToPath } from 'node:url';
@@ -17,6 +17,7 @@ import {
   DATA_DIR,
   DEFAULT_SETTINGS,
   WORKFLOW_ASSETS_DIR,
+  WIKI_ASSETS_DIR,
   THUMBNAIL_ASSETS_DIR,
   createProject,
   createLibraryAsset,
@@ -50,6 +51,8 @@ import {
   listProjectTasks,
   listProjects,
   listWorkflowRecords,
+  listWikiPages as dbListWikiPages,
+  getWikiPage as dbGetWikiPage,
   moveCard,
   createProjectConnection,
   createProjectNode,
@@ -76,6 +79,18 @@ import {
   updateProjectNodePosition,
   updateWorkflowRecord
 } from './storage.js';
+import {
+  WIKI_MEDIA_DIR,
+  wikiManifestExists,
+  listWikiPages,
+  getWikiPage,
+  createWikiPage,
+  updateWikiPage,
+  deleteWikiPage,
+  moveWikiPage,
+  seedWikiFiles,
+  importWikiPages
+} from './wikiStorage.js';
 
 const app = express();
 const PORT = 3001;
@@ -109,6 +124,7 @@ app.use(cors());
 app.use('/api/meshes/editor/save', express.json({ limit: '50mb' }));
 app.use(express.json({ limit: '10mb' }));
 app.use('/assets', express.static(ASSETS_DIR));
+app.use('/wiki-media', express.static(WIKI_MEDIA_DIR));
 
 // Multer Config for Asset Uploads
 const storage = multer.diskStorage({
@@ -310,6 +326,153 @@ const libraryImportUpload = multer({ storage: multer.memoryStorage() });
 const thumbnailUpload = multer({ storage: multer.memoryStorage() });
 const meshEditorSaveUpload = multer({ storage: multer.memoryStorage() });
 const paintDocumentUpload = multer({ storage: multer.memoryStorage() });
+const wikiMediaUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 256 * 1024 * 1024 } });
+
+const WIKI_MEDIA_EXTENSIONS = new Set([
+  '.png', '.jpg', '.jpeg', '.webp', '.gif', '.bmp', '.svg',
+  '.mp4', '.webm', '.ogg', '.mov', '.m4v'
+]);
+
+function buildWikiPageTree(pages) {
+  const byId = new Map(pages.map(page => [page.id, { ...page, children: [] }]));
+  const roots = [];
+  for (const page of byId.values()) {
+    if (page.parentId !== null && page.parentId !== undefined && byId.has(page.parentId)) {
+      byId.get(page.parentId).children.push(page);
+    } else {
+      roots.push(page);
+    }
+  }
+  const sortNodes = nodes => {
+    nodes.sort((a, b) => (a.position - b.position) || (a.id - b.id));
+    nodes.forEach(node => sortNodes(node.children));
+  };
+  sortNodes(roots);
+  return roots;
+}
+
+// ── Wiki ──────────────────────────────────────────────────────────────────
+// Author mode is unlocked only when the gitignored `.wiki-author` marker file
+// exists at the project root. Checked live so it can be toggled without a
+// restart. Read-only installations (end users) never have this file.
+const WIKI_AUTHOR_FLAG = path.join(process.cwd(), '.wiki-author');
+
+function isWikiAuthorMode() {
+  return existsSync(WIKI_AUTHOR_FLAG);
+}
+
+function requireWikiAuthor(req, res, next) {
+  if (!isWikiAuthorMode()) {
+    return res.status(403).json({ error: 'The Wiki is read-only on this installation.' });
+  }
+  next();
+}
+
+app.get('/api/wiki/config', (req, res) => {
+  res.json({ authorMode: isWikiAuthorMode() });
+});
+
+app.get('/api/wiki/pages', async (req, res) => {
+  try {
+    const pages = await listWikiPages();
+    res.json({ pages, tree: buildWikiPageTree(pages) });
+  } catch (err) {
+    console.error('Failed to list wiki pages:', err);
+    res.status(500).json({ error: err.message || 'Failed to list wiki pages' });
+  }
+});
+
+app.get('/api/wiki/pages/:id', async (req, res) => {
+  try {
+    const page = await getWikiPage(req.params.id);
+    if (!page) {
+      return res.status(404).json({ error: 'Wiki page not found' });
+    }
+    res.json(page);
+  } catch (err) {
+    console.error('Failed to load wiki page:', err);
+    res.status(500).json({ error: err.message || 'Failed to load wiki page' });
+  }
+});
+
+app.post('/api/wiki/pages', requireWikiAuthor, async (req, res) => {
+  try {
+    const { parentId = null, title, icon = null, content = '' } = req.body || {};
+    const page = await createWikiPage({ parentId, title, icon, content });
+    res.status(201).json(page);
+  } catch (err) {
+    console.error('Failed to create wiki page:', err);
+    res.status(400).json({ error: err.message || 'Failed to create wiki page' });
+  }
+});
+
+app.put('/api/wiki/pages/:id', requireWikiAuthor, async (req, res) => {
+  try {
+    const { title, icon, content } = req.body || {};
+    const page = await updateWikiPage(req.params.id, { title, icon, content });
+    if (!page) {
+      return res.status(404).json({ error: 'Wiki page not found' });
+    }
+    res.json(page);
+  } catch (err) {
+    console.error('Failed to update wiki page:', err);
+    res.status(400).json({ error: err.message || 'Failed to update wiki page' });
+  }
+});
+
+app.put('/api/wiki/pages/:id/move', requireWikiAuthor, async (req, res) => {
+  try {
+    const { parentId, position } = req.body || {};
+    const page = await moveWikiPage(req.params.id, { parentId, position });
+    if (!page) {
+      return res.status(404).json({ error: 'Wiki page not found' });
+    }
+    res.json(page);
+  } catch (err) {
+    console.error('Failed to move wiki page:', err);
+    res.status(400).json({ error: err.message || 'Failed to move wiki page' });
+  }
+});
+
+app.delete('/api/wiki/pages/:id', requireWikiAuthor, async (req, res) => {
+  try {
+    const result = await deleteWikiPage(req.params.id);
+    if (result.status === 'not-found') {
+      return res.status(404).json({ error: 'Wiki page not found' });
+    }
+    res.status(204).end();
+  } catch (err) {
+    console.error('Failed to delete wiki page:', err);
+    res.status(500).json({ error: err.message || 'Failed to delete wiki page' });
+  }
+});
+
+app.post('/api/wiki/media', requireWikiAuthor, wikiMediaUpload.single('file'), async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ error: 'No file uploaded' });
+    }
+
+    const extension = path.extname(req.file.originalname).toLowerCase();
+    if (!WIKI_MEDIA_EXTENSIONS.has(extension)) {
+      return res.status(400).json({ error: `Unsupported file type: ${extension || 'unknown'}` });
+    }
+
+    await fs.mkdir(WIKI_MEDIA_DIR, { recursive: true });
+    const uniqueName = `${Date.now()}-${Math.round(Math.random() * 1e9)}${extension}`;
+    await fs.writeFile(path.join(WIKI_MEDIA_DIR, uniqueName), req.file.buffer);
+
+    const isVideo = ['.mp4', '.webm', '.ogg', '.mov', '.m4v'].includes(extension);
+    res.status(201).json({
+      url: `http://localhost:${PORT}/wiki-media/${encodeURIComponent(uniqueName)}`,
+      kind: isVideo ? 'video' : 'image',
+      name: req.file.originalname
+    });
+  } catch (err) {
+    console.error('Failed to upload wiki media:', err);
+    res.status(500).json({ error: err.message || 'Failed to upload wiki media' });
+  }
+});
 
 const INITIAL_SCHEMA = {
   projects: [
@@ -6018,7 +6181,60 @@ app.post('/api/setup/install-workflows', async (req, res) => {
 });
 
 // Start server
+// Copy any media referenced from the legacy data/assets/wiki location into the
+// git-tracked wiki/media folder and rewrite the URLs so docs ship with the app.
+async function rewriteAndCopyWikiMedia(content) {
+  if (!content) return content;
+  const regex = /(?:https?:\/\/[^/\s)]+)?\/assets\/wiki\/([^\s)"'<>]+)/g;
+  const matches = [...content.matchAll(regex)];
+  let result = content;
+  for (const match of matches) {
+    const fileName = decodeURIComponent(match[1]);
+    try {
+      await fs.copyFile(path.join(WIKI_ASSETS_DIR, fileName), path.join(WIKI_MEDIA_DIR, fileName));
+    } catch {
+      // source missing — leave the reference, nothing to copy
+    }
+    const newUrl = `http://localhost:${PORT}/wiki-media/${encodeURIComponent(fileName)}`;
+    result = result.split(match[0]).join(newUrl);
+  }
+  return result;
+}
+
+async function migrateWikiIfNeeded() {
+  if (wikiManifestExists()) return;
+
+  let dbRows = [];
+  try {
+    dbRows = await dbListWikiPages();
+  } catch {
+    dbRows = [];
+  }
+
+  if (dbRows.length > 0) {
+    await fs.mkdir(WIKI_MEDIA_DIR, { recursive: true });
+    const fullPages = [];
+    for (const row of dbRows) {
+      const page = await dbGetWikiPage(row.id);
+      if (!page) continue;
+      page.content = await rewriteAndCopyWikiMedia(page.content);
+      fullPages.push(page);
+    }
+    await importWikiPages(fullPages);
+    console.log(`📚 Migrated ${fullPages.length} wiki page(s) from the database into the wiki/ folder`);
+  } else {
+    await seedWikiFiles();
+    console.log('📚 Seeded the wiki/ folder with default documentation');
+  }
+}
+
 initializeStorage().then(async () => {
+  try {
+    await migrateWikiIfNeeded();
+  } catch (err) {
+    console.warn('Failed to prepare wiki documentation folder:', err.message);
+  }
+
   try {
     const cleared = await clearStaleProcessingCards({
       preservedSources: ['Tencent Cloud', 'Tripo AI']
