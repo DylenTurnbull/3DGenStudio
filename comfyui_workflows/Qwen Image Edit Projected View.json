@@ -3,7 +3,7 @@
     "inputs": {
       "shift": 3.1,
       "model": [
-        "13",
+        "15",
         0
       ]
     },
@@ -23,7 +23,7 @@
         0
       ],
       "vae": [
-        "15",
+        "17",
         0
       ]
     },
@@ -51,11 +51,11 @@
   "4": {
     "inputs": {
       "pixels": [
-        "33",
+        "22",
         0
       ],
       "vae": [
-        "15",
+        "17",
         0
       ]
     },
@@ -79,14 +79,8 @@
   },
   "6": {
     "inputs": {
-      "width": [
-        "34",
-        0
-      ],
-      "height": [
-        "34",
-        0
-      ],
+      "width": 1024,
+      "height": 1024,
       "batch_size": 1
     },
     "class_type": "EmptyLatentImage",
@@ -112,13 +106,17 @@
   },
   "8": {
     "inputs": {
-      "prompt": "Draw the front-left side view",
+      "prompt": "Generate the front view",
       "clip": [
-        "14",
+        "16",
         0
       ],
       "vae": [
-        "15",
+        "17",
+        0
+      ],
+      "image1": [
+        "23",
         0
       ]
     },
@@ -131,11 +129,15 @@
     "inputs": {
       "prompt": "",
       "clip": [
-        "14",
+        "16",
         0
       ],
       "vae": [
-        "15",
+        "17",
+        0
+      ],
+      "image1": [
+        "23",
         0
       ]
     },
@@ -179,11 +181,11 @@
   "12": {
     "inputs": {
       "pixels": [
-        "28",
+        "23",
         0
       ],
       "vae": [
-        "15",
+        "17",
         0
       ]
     },
@@ -192,7 +194,7 @@
       "title": "VAE Encode"
     }
   },
-  "13": {
+  "15": {
     "inputs": {
       "lora_name": "Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors",
       "strength_model": 1,
@@ -206,7 +208,7 @@
       "title": "Load LoRA"
     }
   },
-  "14": {
+  "16": {
     "inputs": {
       "clip_name": "qwen_2.5_vl_7b_fp8_scaled.safetensors",
       "type": "qwen_image",
@@ -217,7 +219,7 @@
       "title": "Load CLIP"
     }
   },
-  "15": {
+  "17": {
     "inputs": {
       "vae_name": "qwen_image_vae.safetensors"
     },
@@ -267,108 +269,9 @@
   },
   "21": {
     "inputs": {
-      "image": "front-left-mesh.png"
-    },
-    "class_type": "LoadImage",
-    "_meta": {
-      "title": "Position Image"
-    }
-  },
-  "22": {
-    "inputs": {
-      "image": "Image_1024_00182_.png"
-    },
-    "class_type": "LoadImage",
-    "_meta": {
-      "title": "Reference Image"
-    }
-  },
-  "25": {
-    "inputs": {
-      "value": 1,
-      "width": 1024,
-      "height": 1024
-    },
-    "class_type": "SolidMask",
-    "_meta": {
-      "title": "SolidMask"
-    }
-  },
-  "26": {
-    "inputs": {
-      "mask": [
-        "22",
-        1
-      ]
-    },
-    "class_type": "InvertMask",
-    "_meta": {
-      "title": "InvertMask"
-    }
-  },
-  "27": {
-    "inputs": {
-      "mask": [
-        "25",
-        0
-      ]
-    },
-    "class_type": "MaskToImage",
-    "_meta": {
-      "title": "Convert Mask to Image"
-    }
-  },
-  "28": {
-    "inputs": {
-      "x": 0,
-      "y": 0,
-      "resize_source": false,
-      "destination": [
-        "27",
-        0
-      ],
-      "source": [
-        "22",
-        0
-      ],
-      "mask": [
-        "26",
-        0
-      ]
-    },
-    "class_type": "ImageCompositeMasked",
-    "_meta": {
-      "title": "ImageCompositeMasked"
-    }
-  },
-  "33": {
-    "inputs": {
-      "low_threshold": 0.05,
-      "high_threshold": 0.25,
-      "image": [
-        "21",
-        0
-      ]
-    },
-    "class_type": "Canny",
-    "_meta": {
-      "title": "Canny"
-    }
-  },
-  "34": {
-    "inputs": {
-      "value": 1024
-    },
-    "class_type": "PrimitiveInt",
-    "_meta": {
-      "title": "Image Resolution"
-    }
-  },
-  "35": {
-    "inputs": {
       "filename_prefix": "Qwen",
       "images": [
-        "36",
+        "2",
         0
       ]
     },
@@ -377,25 +280,22 @@
       "title": "Save Image"
     }
   },
-  "36": {
+  "22": {
     "inputs": {
-      "model": "RMBG-2.0",
-      "sensitivity": 1,
-      "process_res": 1024,
-      "mask_blur": 0,
-      "mask_offset": -1,
-      "invert_output": false,
-      "refine_foreground": false,
-      "background": "Alpha",
-      "background_color": "#222222",
-      "image": [
-        "2",
-        0
-      ]
+      "image": "DwarfSorcerer FireBeard-mask-v0.png"
     },
-    "class_type": "RMBG",
+    "class_type": "LoadImage",
     "_meta": {
-      "title": "Remove Background (RMBG)"
+      "title": "Canny Image"
+    }
+  },
+  "23": {
+    "inputs": {
+      "image": "DwarfSorcerer FireBeard-mask-v0.png"
+    },
+    "class_type": "LoadImage",
+    "_meta": {
+      "title": "Source Image"
     }
   }
 }

@@ -46,6 +46,7 @@ export const DEFAULT_SETTINGS = {
     name: 'User',
     avatar: null
   },
+  initialSetupComplete: false,
   apis: {
     google: {
       apiKey: '',

@@ -6,6 +6,10 @@ import { Buffer } from 'buffer';
 import { randomUUID } from 'crypto';
 import { createAssetEditRecord, createBrushChildRecord, resolveProjectImageSource, resolveProjectMeshSource } from './storage.js';
 import fs from 'fs/promises';
+import { createWriteStream } from 'node:fs';
+import { spawn } from 'node:child_process';
+import process from 'node:process';
+import { fileURLToPath } from 'node:url';
 import si from 'systeminformation';
 import tencentcloudSdk from 'tencentcloud-sdk-nodejs-intl-en';
 import {
@@ -5438,7 +5442,7 @@ app.get('/api/system/stats', async (req, res) => {
     // This works regardless of whether it's NVIDIA, AMD, or Intel Arc.
     const gpu = graphics.controllers.reduce((prev, current) => {
       return (current.vram > (prev.vram || 0)) ? current : prev;
-    }, graphics.controllers[0]);
+    }, graphics.controllers[0] || {});
 
     // 2. Universal Mapping: Check for both 'memoryUsed' (NVIDIA style) 
     // and 'vramUsage' (AMD/Standard style)
@@ -5463,6 +5467,496 @@ app.get('/api/system/stats', async (req, res) => {
   } catch (err) {
     console.error('Stats Error:', err);
     res.status(500).json({ error: 'Failed to fetch stats' });
+  }
+});
+
+// ─── INITIAL SETUP ───
+
+const SETUP_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), 'setup');
+const SETUP_CONFIG_PATH = path.join(SETUP_DIR, 'setup.json');
+const SETUP_TYPE_TO_VALUE_TYPE = { Image: 'image', String: 'string', Number: 'number', Boolean: 'boolean' };
+const setupDownloadJobs = new Map();
+
+function getSetupDownloadJob(jobId) {
+  if (!setupDownloadJobs.has(jobId)) {
+    setupDownloadJobs.set(jobId, { subscribers: new Set(), snapshot: null });
+  }
+  return setupDownloadJobs.get(jobId);
+}
+
+function publishSetupDownloadProgress(jobId, payload) {
+  const job = getSetupDownloadJob(jobId);
+  const message = { jobId, timestamp: Date.now(), ...payload };
+  job.snapshot = message;
+
+  for (const response of job.subscribers) {
+    response.write(`data: ${JSON.stringify(message)}\n\n`);
+  }
+
+  if (message.status === 'done' || message.status === 'error') {
+    setTimeout(() => {
+      if (job.subscribers.size === 0) {
+        setupDownloadJobs.delete(jobId);
+      }
+    }, 60000);
+  }
+}
+
+function subscribeSetupDownload(jobId, req, res) {
+  const job = getSetupDownloadJob(jobId);
+
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache, no-transform');
+  res.setHeader('Connection', 'keep-alive');
+  res.setHeader('X-Accel-Buffering', 'no');
+  res.flushHeaders?.();
+  res.write('retry: 1000\n\n');
+
+  job.subscribers.add(res);
+
+  if (job.snapshot) {
+    res.write(`data: ${JSON.stringify(job.snapshot)}\n\n`);
+  }
+
+  const heartbeat = setInterval(() => res.write(': keep-alive\n\n'), 15000);
+
+  req.on('close', () => {
+    clearInterval(heartbeat);
+    job.subscribers.delete(res);
+  });
+}
+
+async function loadSetupConfig() {
+  const raw = await fs.readFile(SETUP_CONFIG_PATH, 'utf-8');
+  return JSON.parse(raw);
+}
+
+async function pathExists(targetPath) {
+  try {
+    await fs.access(targetPath);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function fileSizeOrNull(targetPath) {
+  try {
+    const stat = await fs.stat(targetPath);
+    return stat.isFile() ? stat.size : null;
+  } catch {
+    return null;
+  }
+}
+
+function resolveComfySubPath(comfyPath, relativePath) {
+  const normalizedRelative = String(relativePath || '').replace(/^[/\\]+/, '');
+  return path.join(comfyPath, normalizedRelative);
+}
+
+async function downloadFileWithProgress(url, destinationPath, onChunk) {
+  const response = await fetch(url);
+  if (!response.ok || !response.body) {
+    throw new Error(`Download failed (${response.status} ${response.statusText})`);
+  }
+
+  const totalBytes = Number(response.headers.get('content-length')) || 0;
+  const tempPath = `${destinationPath}.part`;
+  const writeStream = createWriteStream(tempPath);
+
+  let receivedBytes = 0;
+
+  try {
+    for await (const chunk of response.body) {
+      const writeOk = writeStream.write(chunk);
+      if (!writeOk) {
+        await new Promise(resolve => writeStream.once('drain', resolve));
+      }
+      receivedBytes += chunk.length;
+      onChunk?.(receivedBytes, totalBytes);
+    }
+
+    await new Promise((resolve, reject) => {
+      writeStream.end(err => err ? reject(err) : resolve());
+    });
+
+    await fs.rename(tempPath, destinationPath);
+  } catch (err) {
+    writeStream.destroy();
+    try { await fs.unlink(tempPath); } catch { /* best-effort cleanup */ }
+    throw err;
+  }
+
+  return { receivedBytes, totalBytes };
+}
+
+async function runSetupDownloads(jobId, comfyPath, files) {
+  const totalExpectedBytes = files.reduce((sum, file) => sum + (Number(file.expectedBytes) || 0), 0);
+  let cumulativeCompletedBytes = 0;
+
+  publishSetupDownloadProgress(jobId, {
+    status: 'downloading',
+    currentIndex: 0,
+    totalFiles: files.length,
+    currentFile: files[0]?.fileName || '',
+    currentBytes: 0,
+    currentTotalBytes: 0,
+    currentPercent: 0,
+    overallPercent: 0
+  });
+
+  for (let index = 0; index < files.length; index += 1) {
+    const file = files[index];
+    const destinationPath = resolveComfySubPath(comfyPath, path.join(file.relativeDir, file.fileName));
+
+    try {
+      await fs.mkdir(path.dirname(destinationPath), { recursive: true });
+
+      const existingSize = await fileSizeOrNull(destinationPath);
+      if (existingSize !== null && existingSize > 0) {
+        cumulativeCompletedBytes += existingSize;
+        publishSetupDownloadProgress(jobId, {
+          status: 'downloading',
+          currentIndex: index,
+          totalFiles: files.length,
+          currentFile: file.fileName,
+          currentBytes: existingSize,
+          currentTotalBytes: existingSize,
+          currentPercent: 100,
+          overallPercent: totalExpectedBytes > 0 ? Math.min(100, Math.round((cumulativeCompletedBytes / totalExpectedBytes) * 100)) : 0,
+          skipped: true
+        });
+        continue;
+      }
+
+      let lastEmit = 0;
+      let lastReceived = 0;
+
+      const result = await downloadFileWithProgress(file.url, destinationPath, (currentBytes, currentTotalBytes) => {
+        const now = Date.now();
+        if (now - lastEmit < 200 && currentBytes < currentTotalBytes) {
+          return;
+        }
+        lastEmit = now;
+        lastReceived = currentBytes;
+
+        publishSetupDownloadProgress(jobId, {
+          status: 'downloading',
+          currentIndex: index,
+          totalFiles: files.length,
+          currentFile: file.fileName,
+          currentBytes,
+          currentTotalBytes,
+          currentPercent: currentTotalBytes > 0 ? Math.round((currentBytes / currentTotalBytes) * 100) : 0,
+          overallPercent: totalExpectedBytes > 0 ? Math.min(100, Math.round(((cumulativeCompletedBytes + currentBytes) / totalExpectedBytes) * 100)) : 0
+        });
+      });
+
+      cumulativeCompletedBytes += Math.max(result.receivedBytes, lastReceived);
+
+      publishSetupDownloadProgress(jobId, {
+        status: 'downloading',
+        currentIndex: index,
+        totalFiles: files.length,
+        currentFile: file.fileName,
+        currentBytes: result.receivedBytes,
+        currentTotalBytes: result.totalBytes || result.receivedBytes,
+        currentPercent: 100,
+        overallPercent: totalExpectedBytes > 0 ? Math.min(100, Math.round((cumulativeCompletedBytes / totalExpectedBytes) * 100)) : 0
+      });
+    } catch (err) {
+      console.error(`[setup] download failed for ${file.fileName}:`, err);
+      publishSetupDownloadProgress(jobId, {
+        status: 'error',
+        currentIndex: index,
+        totalFiles: files.length,
+        currentFile: file.fileName,
+        error: err.message || String(err)
+      });
+      return;
+    }
+  }
+
+  publishSetupDownloadProgress(jobId, {
+    status: 'done',
+    totalFiles: files.length,
+    currentIndex: files.length,
+    overallPercent: 100
+  });
+}
+
+async function installSetupWorkflow(workflowConfig, diffusionModelFileName) {
+  if (!workflowConfig?.File) {
+    throw new Error('Workflow configuration is missing a File path');
+  }
+
+  const absoluteWorkflowPath = path.join(path.dirname(fileURLToPath(import.meta.url)), workflowConfig.File);
+  const rawJson = await fs.readFile(absoluteWorkflowPath, 'utf-8');
+  const substitutedJson = rawJson.replaceAll('{diffusion_model}', diffusionModelFileName);
+  const workflowJson = JSON.parse(substitutedJson);
+
+  const parsedWorkflow = parseComfyWorkflow(workflowJson);
+  const availableParameters = new Map(parsedWorkflow.inputs.map(input => [input.id, input]));
+  const availableOutputs = new Map(parsedWorkflow.outputs.map(output => [String(output.nodeId), output]));
+
+  const parameters = [];
+  for (const inputCfg of workflowConfig.Inputs || []) {
+    const parameterId = `${inputCfg.Node}.${inputCfg.Input}`;
+    const sourceParameter = availableParameters.get(parameterId);
+    if (!sourceParameter) {
+      throw new Error(`Workflow "${workflowConfig.Name}": input ${parameterId} not found`);
+    }
+    parameters.push({
+      ...sourceParameter,
+      name: sanitizeDisplayName(inputCfg.Name || sourceParameter.name, sourceParameter.name),
+      valueType: normalizeComfyValueType(SETUP_TYPE_TO_VALUE_TYPE[inputCfg.Type], getDefaultComfyValueType(sourceParameter))
+    });
+  }
+
+  const outputs = [];
+  for (const outputCfg of workflowConfig.Outputs || []) {
+    const outputNodeId = String(outputCfg.Node);
+    const sourceOutput = availableOutputs.get(outputNodeId);
+    if (!sourceOutput) {
+      throw new Error(`Workflow "${workflowConfig.Name}": output node ${outputNodeId} not found`);
+    }
+    outputs.push({
+      ...sourceOutput,
+      name: sanitizeDisplayName(outputCfg.Name || sourceOutput.nodeTitle, sourceOutput.nodeTitle),
+      valueType: normalizeComfyValueType(SETUP_TYPE_TO_VALUE_TYPE[outputCfg.Type], 'image')
+    });
+  }
+
+  if (outputs.length === 0) {
+    throw new Error(`Workflow "${workflowConfig.Name}" has no outputs configured`);
+  }
+
+  const filePath = await saveWorkflowFile(workflowConfig.Name, workflowJson);
+  const workflowRecord = await createWorkflowRecord({
+    name: sanitizeDisplayName(workflowConfig.Name, 'Workflow'),
+    filePath,
+    parameters,
+    outputs
+  });
+
+  return workflowRecord;
+}
+
+async function pickFolderNative({ description = 'Select folder', initialPath = '' } = {}) {
+  if (process.platform !== 'win32') {
+    throw new Error('Native folder picker is only available on Windows');
+  }
+
+  const safeDescription = String(description).replace(/'/g, "''");
+  const safeInitial = String(initialPath || '').replace(/'/g, "''");
+
+  const script = `
+$ErrorActionPreference = 'Stop'
+Add-Type -AssemblyName System.Windows.Forms | Out-Null
+$dlg = New-Object System.Windows.Forms.FolderBrowserDialog
+$dlg.Description = '${safeDescription}'
+$dlg.ShowNewFolderButton = $false
+if ('${safeInitial}'.Length -gt 0 -and (Test-Path -LiteralPath '${safeInitial}')) {
+  $dlg.SelectedPath = '${safeInitial}'
+}
+$owner = New-Object System.Windows.Forms.Form
+$owner.TopMost = $true
+$owner.ShowInTaskbar = $false
+$owner.WindowState = 'Minimized'
+$owner.Opacity = 0
+$owner.Show()
+$owner.Activate()
+try {
+  $result = $dlg.ShowDialog($owner)
+} finally {
+  $owner.Close()
+  $owner.Dispose()
+}
+if ($result -eq [System.Windows.Forms.DialogResult]::OK) {
+  Write-Output $dlg.SelectedPath
+}
+`;
+
+  return await new Promise((resolve, reject) => {
+    const proc = spawn(
+      'powershell.exe',
+      ['-NoProfile', '-NonInteractive', '-STA', '-Command', script],
+      { windowsHide: true }
+    );
+
+    let stdout = '';
+    let stderr = '';
+
+    proc.stdout.on('data', chunk => { stdout += chunk.toString(); });
+    proc.stderr.on('data', chunk => { stderr += chunk.toString(); });
+    proc.on('error', err => reject(err));
+    proc.on('close', code => {
+      if (code !== 0) {
+        reject(new Error(stderr.trim() || `Folder picker exited with code ${code}`));
+        return;
+      }
+      const selected = stdout.replace(/\r/g, '').split('\n').map(l => l.trim()).filter(Boolean).pop() || '';
+      resolve(selected);
+    });
+  });
+}
+
+app.post('/api/setup/pick-folder', async (req, res) => {
+  try {
+    const description = String(req.body?.description || 'Select folder').slice(0, 200);
+    const initialPath = String(req.body?.initialPath || '').slice(0, 1024);
+    const selected = await pickFolderNative({ description, initialPath });
+    res.json({ path: selected });
+  } catch (err) {
+    console.error('Folder picker failed:', err);
+    res.status(500).json({ error: err.message || 'Folder picker failed' });
+  }
+});
+
+app.get('/api/setup/config', async (req, res) => {
+  try {
+    res.json(await loadSetupConfig());
+  } catch (err) {
+    console.error('Failed to load setup config:', err);
+    res.status(500).json({ error: err.message || 'Failed to load setup config' });
+  }
+});
+
+app.post('/api/setup/check-comfy-path', async (req, res) => {
+  try {
+    const comfyPath = String(req.body?.path || '').trim();
+    if (!comfyPath) {
+      return res.status(400).json({ error: 'A ComfyUI folder path is required' });
+    }
+
+    const rootExists = await pathExists(comfyPath);
+    if (!rootExists) {
+      return res.status(400).json({ error: `Folder does not exist: ${comfyPath}` });
+    }
+
+    const modelsDir = path.join(comfyPath, 'models');
+    const modelsExist = await pathExists(modelsDir);
+    if (!modelsExist) {
+      return res.status(400).json({ error: `This does not look like a ComfyUI folder (missing "models" subfolder): ${comfyPath}` });
+    }
+
+    const config = await loadSetupConfig();
+    const created = [];
+    for (const relativePath of Object.values(config.ComfyUIPaths || {})) {
+      const target = resolveComfySubPath(comfyPath, relativePath);
+      if (!(await pathExists(target))) {
+        await fs.mkdir(target, { recursive: true });
+        created.push(relativePath);
+      }
+    }
+
+    res.json({ ok: true, comfyPath, createdSubfolders: created });
+  } catch (err) {
+    console.error('Failed to validate ComfyUI path:', err);
+    res.status(500).json({ error: err.message || 'Failed to validate ComfyUI path' });
+  }
+});
+
+app.post('/api/setup/check-files', async (req, res) => {
+  try {
+    const comfyPath = String(req.body?.comfyPath || '').trim();
+    const files = Array.isArray(req.body?.files) ? req.body.files : [];
+
+    if (!comfyPath) {
+      return res.status(400).json({ error: 'comfyPath is required' });
+    }
+
+    const results = [];
+    for (const file of files) {
+      const absPath = resolveComfySubPath(comfyPath, path.join(file.relativeDir || '', file.fileName || ''));
+      const size = await fileSizeOrNull(absPath);
+      results.push({
+        relativeDir: file.relativeDir || '',
+        fileName: file.fileName || '',
+        exists: size !== null && size > 0,
+        sizeBytes: size
+      });
+    }
+
+    res.json({ files: results });
+  } catch (err) {
+    console.error('Failed to check setup files:', err);
+    res.status(500).json({ error: err.message || 'Failed to check setup files' });
+  }
+});
+
+app.post('/api/setup/download', async (req, res) => {
+  try {
+    const comfyPath = String(req.body?.comfyPath || '').trim();
+    const files = Array.isArray(req.body?.files) ? req.body.files : [];
+
+    if (!comfyPath) {
+      return res.status(400).json({ error: 'comfyPath is required' });
+    }
+
+    if (files.length === 0) {
+      const jobId = randomUUID();
+      publishSetupDownloadProgress(jobId, { status: 'done', totalFiles: 0, currentIndex: 0, overallPercent: 100 });
+      return res.json({ jobId });
+    }
+
+    const jobId = randomUUID();
+    getSetupDownloadJob(jobId);
+
+    runSetupDownloads(jobId, comfyPath, files).catch(err => {
+      console.error('[setup] download job crashed:', err);
+      publishSetupDownloadProgress(jobId, { status: 'error', error: err.message || String(err) });
+    });
+
+    res.json({ jobId });
+  } catch (err) {
+    console.error('Failed to start setup downloads:', err);
+    res.status(500).json({ error: err.message || 'Failed to start setup downloads' });
+  }
+});
+
+app.get('/api/setup/download/progress/:jobId', (req, res) => {
+  subscribeSetupDownload(req.params.jobId, req, res);
+});
+
+app.post('/api/setup/install-workflows', async (req, res) => {
+  try {
+    const selections = Array.isArray(req.body?.selections) ? req.body.selections : [];
+    if (selections.length === 0) {
+      return res.json({ installed: [] });
+    }
+
+    const config = await loadSetupConfig();
+    const diffusionByName = new Map((config.DiffusionModels || []).map(model => [model.Name, model]));
+    const installed = [];
+    const errors = [];
+
+    for (const selection of selections) {
+      const diffusion = diffusionByName.get(selection.diffusionName);
+      if (!diffusion) {
+        errors.push({ diffusionName: selection.diffusionName, error: 'Unknown DiffusionModel' });
+        continue;
+      }
+      const modelEntry = diffusion.Models?.[selection.modelQuality];
+      if (!modelEntry?.FileName) {
+        errors.push({ diffusionName: selection.diffusionName, error: `Unknown model quality ${selection.modelQuality}` });
+        continue;
+      }
+      for (const workflowConfig of diffusion.Workflows || []) {
+        try {
+          const record = await installSetupWorkflow(workflowConfig, modelEntry.FileName);
+          installed.push({ id: record.id, name: record.name });
+        } catch (err) {
+          console.error(`[setup] failed to install workflow ${workflowConfig?.Name}:`, err);
+          errors.push({ workflow: workflowConfig?.Name, error: err.message || String(err) });
+        }
+      }
+    }
+
+    res.json({ installed, errors });
+  } catch (err) {
+    console.error('Failed to install setup workflows:', err);
+    res.status(500).json({ error: err.message || 'Failed to install setup workflows' });
   }
 });
 

@@ -67,6 +67,7 @@
   "5": {
     "inputs": {
       "strength": 1,
+      "pre_cfg": false,
       "model": [
         "1",
         0
@@ -112,7 +113,7 @@
   },
   "8": {
     "inputs": {
-      "prompt": "Draw the front-left side view",
+      "prompt": "Draw the front view",
       "clip": [
         "14",
         0
@@ -228,7 +229,7 @@
   },
   "19": {
     "inputs": {
-      "unet_name": "qwen-image-edit-2511-Q6_K.gguf"
+      "unet_name": "{diffusion_model}"
     },
     "class_type": "UnetLoaderGGUF",
     "_meta": {
@@ -267,7 +268,7 @@
   },
   "21": {
     "inputs": {
-      "image": "front-left-mesh.png"
+      "image": ""
     },
     "class_type": "LoadImage",
     "_meta": {
@@ -276,7 +277,7 @@
   },
   "22": {
     "inputs": {
-      "image": "Image_1024_00182_.png"
+      "image": ""
     },
     "class_type": "LoadImage",
     "_meta": {

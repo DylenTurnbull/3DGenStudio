@@ -54,7 +54,7 @@
     "inputs": {
       "filename_prefix": "ComfyUI",
       "images": [
-        "13",
+        "170",
         0
       ]
     },
@@ -421,6 +421,27 @@
     "class_type": "LoadImageMask",
     "_meta": {
       "title": "Load Image (as Mask)"
+    }
+  },
+  "170": {
+    "inputs": {
+      "model": "RMBG-2.0",
+      "sensitivity": 1,
+      "process_res": 1024,
+      "mask_blur": 0,
+      "mask_offset": 0,
+      "invert_output": false,
+      "refine_foreground": false,
+      "background": "Alpha",
+      "background_color": "#222222",
+      "image": [
+        "13",
+        0
+      ]
+    },
+    "class_type": "RMBG",
+    "_meta": {
+      "title": "Remove Background (RMBG)"
     }
   }
 }
