@@ -31,7 +31,8 @@ const TOOLS = {
     { id: 'paint', label: 'Brush / Image Brush', icon: 'brush' }
   ],
   ai: [
-    { id: 'mask', label: 'Mask + ComfyUI', icon: 'auto_fix_high' }
+    { id: 'mask', label: 'Mask + ComfyUI', icon: 'auto_fix_high' },
+    { id: 'comfyui', label: 'ComfyUI', icon: 'auto_awesome' }
   ]
 }
 
@@ -1481,6 +1482,152 @@ export default function ImageEditorPage() {
     }
   }, [addNotification, bumpRender, createEmptyCanvas, exportCurrentComposite, imageName, imageParamSources, layers, loadAssetAsFile, maskHasPixels, projectId, pushUndoSnapshot, runComfyWorkflow, selectedWorkflow, subscribeToComfyWorkflowProgress, workflowValues])
 
+  const handleRunAiFull = useCallback(async () => {
+    if (!selectedWorkflow) {
+      setFeedback('Select a ComfyUI workflow first.')
+      return
+    }
+
+    const sourceCanvas = await exportCurrentComposite()
+    if (!sourceCanvas) {
+      setFeedback('Unable to prepare source image.')
+      return
+    }
+
+    setAiRunning(true)
+    setFeedback('Running ComfyUI workflow...')
+
+    const promptId = createExecutionId('image-editor-prompt')
+    const clientId = createExecutionId('image-editor-client')
+    const stopProgress = subscribeToComfyWorkflowProgress(promptId, {
+      onMessage: payload => {
+        const detail = payload?.detail || payload?.currentNodeLabel
+        if (detail) {
+          setFeedback(String(detail))
+        }
+      },
+      onError: () => null
+    })
+
+    try {
+      const sourceFile = await canvasToPngFile(sourceCanvas, 'image-editor-source.png')
+
+      const inputs = {}
+
+      for (const parameter of (selectedWorkflow.parameters || [])) {
+        const valueType = getValueType(parameter)
+
+        if (valueType === 'image') {
+          const config = imageParamSources[parameter.id] || { type: 'none' }
+
+          if (config.type === 'source') {
+            inputs[parameter.id] = sourceFile
+            continue
+          }
+
+          if (config.type === 'asset') {
+            if (!config.asset) {
+              throw new Error(`Select an asset for image parameter "${parameter.name}".`)
+            }
+            inputs[parameter.id] = await loadAssetAsFile(config.asset)
+            continue
+          }
+
+          if (config.type === 'file') {
+            if (!config.file) {
+              throw new Error(`Select a local file for image parameter "${parameter.name}".`)
+            }
+            inputs[parameter.id] = config.file
+            continue
+          }
+
+          // 'mask' or 'none' have no meaning when working on the whole image
+          continue
+        }
+
+        if (valueType === 'boolean') {
+          inputs[parameter.id] = Boolean(workflowValues[parameter.id])
+          continue
+        }
+
+        if (valueType === 'number') {
+          const parsed = Number(workflowValues[parameter.id])
+          inputs[parameter.id] = Number.isFinite(parsed) ? parsed : Number(parameter.defaultValue || 0)
+          continue
+        }
+
+        inputs[parameter.id] = workflowValues[parameter.id] ?? parameter.defaultValue ?? ''
+      }
+
+      const hasSourceInput = Object.values(imageParamSources).some(config => config?.type === 'source')
+      const hasImageParams = (selectedWorkflow.parameters || []).some(parameter => getValueType(parameter) === 'image')
+
+      if (hasImageParams && !hasSourceInput) {
+        throw new Error('Select one image input as source.')
+      }
+
+      const result = await runComfyWorkflow(projectId ? Number(projectId) : null, {
+        workflowId: Number(selectedWorkflow.id),
+        name: `${imageName} AI Edit`,
+        promptId,
+        clientId,
+        persistGeneratedAssets: false,
+        persistProcessingCard: false,
+        inputs
+      })
+
+      const generated = normalizeWorkflowResult(result)
+      if (!generated) {
+        throw new Error('The workflow did not return an output image.')
+      }
+
+      const outputUrl = buildAssetUrl(generated)
+      if (!outputUrl) {
+        throw new Error('Unable to resolve output image URL.')
+      }
+
+      const baseCanvas = layerCanvasesRef.current.get(layers[0]?.id)
+      if (!baseCanvas) {
+        throw new Error('Unable to resolve destination canvas for AI output.')
+      }
+
+      const outputCanvas = await loadImageToCanvas(outputUrl)
+      const patchCanvas = createEmptyCanvas(baseCanvas.width, baseCanvas.height)
+      const patchContext = patchCanvas.getContext('2d')
+      patchContext.imageSmoothingEnabled = true
+      patchContext.drawImage(outputCanvas, 0, 0, baseCanvas.width, baseCanvas.height)
+
+      pushUndoSnapshot()
+      const id = createLayerId()
+      const nextLayer = {
+        id,
+        name: `AI ${layers.filter(layer => !layer.locked).length + 1}`,
+        opacity: 1,
+        blendMode: 'source-over',
+        visible: true,
+        locked: false
+      }
+
+      layerCanvasesRef.current.set(id, patchCanvas)
+      setLayers(prev => [...prev, nextLayer])
+      setSelectedLayerId(id)
+      setFeedback('AI result applied to the full image.')
+      bumpRender()
+    } catch (err) {
+      const failureMessage = err.message || 'ComfyUI execution failed.'
+      setFeedback(failureMessage)
+      addNotification({
+        title: 'Image edit failed',
+        message: failureMessage,
+        source: 'ComfyUI',
+        tone: 'error'
+      })
+    } finally {
+      stopProgress()
+      setAiRunning(false)
+    }
+  }, [addNotification, bumpRender, createEmptyCanvas, exportCurrentComposite, imageName, imageParamSources, layers, loadAssetAsFile, projectId, pushUndoSnapshot, runComfyWorkflow, selectedWorkflow, subscribeToComfyWorkflowProgress, workflowValues])
+
   const handleSaveImage = useCallback(async () => {
     if (!numericAssetId) return
     setSaving(true)
@@ -2251,6 +2398,133 @@ export default function ImageEditorPage() {
           </label>
 
           <p className="image-editor-help">Paint directly on the canvas. If the selected layer is locked, a new layer will be created automatically.</p>
+        </div>
+      )
+    }
+
+    if (toolGroup === 'ai' && toolId === 'comfyui') {
+      return (
+        <div className="image-editor-controls">
+          <label className="image-editor-label">
+            ComfyUI Workflow
+            <select
+              className="image-editor-input"
+              value={selectedWorkflowId}
+              onChange={event => setSelectedWorkflowId(event.target.value)}
+              disabled={workflowLoading || workflows.length === 0}
+            >
+              {workflows.length === 0 ? (
+                <option value="">No compatible workflows</option>
+              ) : workflows.map(workflow => (
+                <option key={workflow.id} value={workflow.id}>{workflow.name}</option>
+              ))}
+            </select>
+          </label>
+
+          {selectedWorkflow && (
+            <div className="image-editor-controls image-editor-controls--nested">
+              <span className="image-editor-label">Image Inputs</span>
+              {(selectedWorkflow.parameters || [])
+                .filter(parameter => getValueType(parameter) === 'image')
+                .map(parameter => {
+                  const config = imageParamSources[parameter.id] || { type: 'none' }
+                  const displayType = config.type === 'mask' ? 'none' : config.type
+                  return (
+                    <div key={parameter.id} className="image-editor-label image-editor-ai-input">
+                      <span>{parameter.name}</span>
+                      <select
+                        className="image-editor-input"
+                        value={displayType}
+                        onChange={event => handleImageParamSourceChange(parameter.id, event.target.value)}
+                      >
+                        <option value="none">- Not used -</option>
+                        <option value="source">Use as source image (full image)</option>
+                        <option value="asset">From assets</option>
+                        <option value="file">From computer</option>
+                      </select>
+
+                      {config.type === 'asset' && (
+                        <div className="image-editor-ai-row">
+                          <span className="image-editor-help">{config.asset?.name || 'No asset selected'}</span>
+                          <button
+                            type="button"
+                            className="image-editor-btn"
+                            onClick={() => {
+                              setPendingAssetParamId(parameter.id)
+                              setShowAssetSelector(true)
+                            }}
+                          >
+                            Browse
+                          </button>
+                        </div>
+                      )}
+
+                      {config.type === 'file' && (
+                        <div className="image-editor-ai-row">
+                          <span className="image-editor-help">{config.fileName || 'No file chosen'}</span>
+                          <label className="image-editor-btn" style={{ cursor: 'pointer' }}>
+                            Choose file
+                            <input
+                              type="file"
+                              accept="image/*"
+                              className="image-editor-hidden-file"
+                              onChange={event => {
+                                const file = event.target.files?.[0]
+                                if (file) {
+                                  handleImageParamSourceChange(parameter.id, 'file', file)
+                                }
+                                event.target.value = ''
+                              }}
+                            />
+                          </label>
+                        </div>
+                      )}
+                    </div>
+                  )
+                })}
+            </div>
+          )}
+
+          {(selectedWorkflow?.parameters || [])
+            .filter(parameter => getValueType(parameter) !== 'image')
+            .map(parameter => {
+              const valueType = getValueType(parameter)
+              if (valueType === 'boolean') {
+                return (
+                  <label key={parameter.id} className="image-editor-label image-editor-label--checkbox">
+                    <input
+                      type="checkbox"
+                      checked={Boolean(workflowValues[parameter.id])}
+                      onChange={event => setWorkflowValues(prev => ({ ...prev, [parameter.id]: event.target.checked }))}
+                    />
+                    <span>{parameter.name}</span>
+                  </label>
+                )
+              }
+
+              return (
+                <label key={parameter.id} className="image-editor-label">
+                  {parameter.name}
+                  <input
+                    className="image-editor-input"
+                    type={valueType === 'number' ? 'number' : 'text'}
+                    value={workflowValues[parameter.id] ?? ''}
+                    onChange={event => setWorkflowValues(prev => ({ ...prev, [parameter.id]: event.target.value }))}
+                  />
+                </label>
+              )
+            })}
+
+          <button
+            type="button"
+            className="image-editor-btn image-editor-btn--primary"
+            disabled={aiRunning || !selectedWorkflow}
+            onClick={handleRunAiFull}
+          >
+            {aiRunning ? 'Running...' : 'Run ComfyUI'}
+          </button>
+
+          <p className="image-editor-help">Sends the full composited image to ComfyUI and adds the result as a new layer.</p>
         </div>
       )
     }
