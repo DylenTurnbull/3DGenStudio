@@ -3030,9 +3030,9 @@ app.post('/api/comfyui/workflows/run', workflowExecutionUpload.any(), async (req
       const generatedAssetPayload = {
         projectId: normalizedProjectId,
         type: inferredAssetType,
-        name: inferredAssetType === 'mesh'
+        name: (trimmedName || inferredAssetType === 'mesh')
           ? processingCardName
-          : createGeneratedImageName(workflow.name, extension),
+          : createGeneratedImageName(workflow.name, extension), // honor the user-provided Result name; fall back to a generated name only when none was given
         filePath: storedFilePath,
         width: dimensions.width,
         height: dimensions.height,
