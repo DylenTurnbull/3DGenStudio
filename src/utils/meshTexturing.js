@@ -497,12 +497,35 @@ function getOrBuildIslandPath(paintTarget, islandIndex) {
 
   islandFaces.forEach(currentFaceIndex => {
     const vertices = getFaceVertexIndices(geometry, currentFaceIndex)
-    const [a, b, c] = vertices.map(vertexIndex => mapUvToCanvasPoint(
+    let [a, b, c] = vertices.map(vertexIndex => mapUvToCanvasPoint(
       new THREE.Vector2(uvArray[vertexIndex * 2], uvArray[vertexIndex * 2 + 1]),
       textureWidth,
       textureHeight,
       textureConfig
     ))
+
+    // Skip degenerate triangles whose mapped coordinates aren't finite. A single
+    // NaN/Infinity in a Path2D poisons the WHOLE path, so isPointInPath/clip then
+    // misbehave for every point. Faces referencing vertices with missing/invalid
+    // UVs are the usual source.
+    if (!Number.isFinite(a.x) || !Number.isFinite(a.y) ||
+        !Number.isFinite(b.x) || !Number.isFinite(b.y) ||
+        !Number.isFinite(c.x) || !Number.isFinite(c.y)) {
+      return
+    }
+
+    // Normalize every triangle to a consistent (CCW) winding before adding it.
+    // Meshes with mirrored UVs (e.g. symmetric characters) pack left/right faces
+    // onto the same UV area with OPPOSITE winding; under Canvas's default nonzero
+    // fill rule those overlapping triangles cancel out, collapsing the island's
+    // clip region to (near) empty. That made the clip erase every brush stamp —
+    // i.e. painting silently did nothing on such meshes.
+    const signedArea = (b.x - a.x) * (c.y - a.y) - (c.x - a.x) * (b.y - a.y)
+    if (signedArea < 0) {
+      const swap = b
+      b = c
+      c = swap
+    }
 
     islandPath.moveTo(a.x, a.y)
     islandPath.lineTo(b.x, b.y)
