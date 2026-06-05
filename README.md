@@ -19,6 +19,7 @@
 
 | Date | Description |
 | --- | --- |
+| **2026-06-05** | Refactored the code<br>Fixed MeshEditor<br>Added more workflows |
 | **2026-06-03** | Mesh Editor - Projection Mode: GPU Processing and Improved seams<br>Image Editor: New ComfyUI mode in AI<br>Graph page: Text node can generate text with ComfyUI<br>Setup Wizard: Added Flux2Dev and Flux2Klein9B |
 | **2026-05-29** | Added Setup Wizard<br>Added a Wiki |
 | **2026-05-23** | Mesh Editor : Projection mode can sent Textured/Untextured view to ComfyUI<br>Fixed delete a project |

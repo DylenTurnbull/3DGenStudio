@@ -21,6 +21,17 @@ const STATUS_MAP = {
 
 const CHANGE_LOG_ENTRIES = [
   {
+    version: 'v1.0.2',
+    date: '2026-06-05',
+    items: [
+			'Refactored the code',
+			'Mesh Editor: Fixed Painting mode',
+			'Mesh Editor: Fixed Texturing mode',
+			'Mesh Editor: Improved Projection mode',
+			'Setup Wizard: Added more workflows'
+    ],
+  },
+  {
     version: 'v1.0.1',
     date: '2026-06-03',
     items: [
