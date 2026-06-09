@@ -12,6 +12,7 @@ import { createMeshThumbnailFile } from '../utils/meshThumbnail'
 import './KanbanPage.css'
 import AssetSelectorModal from '../components/AssetSelectorModal';
 import KanbanImageCard from '../components/kanban/KanbanImageCard'
+import MeshGenApiOptions from '../components/kanban/MeshGenApiOptions'
 import {
   DEFAULT_ATTRIBUTE_TYPE_ID,
   IMAGE_API_LIST,
@@ -36,6 +37,7 @@ import {
   formatWorkflowDefaultValue,
   getAssetChildren,
   getComfyDraftFromWorkflow,
+  getMeshGenApiDefaults,
   getWorkflowFileInputAccept,
   getWorkflowFileInputIcon,
   getWorkflowParameterValueType,
@@ -1106,39 +1108,179 @@ export default function KanbanPage() {
       return
     }
 
-    const name = String(draft.name || '').trim() || draft.prompt.trim().slice(0, 60)
+    const name = String(draft.name || '').trim()
+    if (!name) {
+      showStatusMessage('Add a name for the generated mesh.', 'error')
+      return
+    }
+
+    const prompt = draft.prompt.trim()
     const cardId = createImageCardId()
+    const isTencentMeshApi = isTencentMeshGenerationApi(draft.selectedApi)
+    const isTripoMeshApi = isTripoMeshGenerationApi(draft.selectedApi)
+    const isTripoP1Model = isTripoMeshApi && (draft.modelVersion || 'v2.5-20250123') === 'P1-20260311'
+    const providerLabel = isTencentMeshApi
+      ? 'Tencent Cloud'
+      : isTripoMeshApi
+        ? 'Tripo AI'
+        : (meshGenerationApis.find(api => api.id === draft.selectedApi)?.name || 'Remote API')
 
     try {
       setPendingMeshGeneration({
         selectedApi: draft.selectedApi,
         title: name,
-        source: meshGenerationApis.find(api => api.id === draft.selectedApi)?.name || 'Remote API',
+        source: providerLabel,
         detail: 'Submitting mesh generation request'
       })
       setMeshDraft(null)
       setLoading(true)
-      await runMeshGenerationApi(projectId, {
-        selectedApi: draft.selectedApi,
-        prompt: draft.prompt.trim(),
+
+      if (isTencentMeshApi) {
+        const queuedJob = await runMeshGenerationApi(projectId, {
+          name,
+          selectedApi: draft.selectedApi,
+          prompt,
+          cardId,
+          region: draft.region,
+          modelVersion: draft.modelVersion,
+          enablePBR: draft.enablePBR,
+          faceCount: Number(draft.faceCount) || 500000,
+          generationType: draft.generationType,
+          polygonType: draft.generationType === 'LowPoly' ? draft.polygonType : undefined
+        })
+
+        setImageEditProgressByCardId(prev => ({
+          ...prev,
+          [cardId]: {
+            status: 'processing',
+            source: queuedJob.provider || 'Tencent Cloud',
+            detail: 'Tencent Cloud job submitted. Use GET RESULT to refresh status.',
+            currentNodeLabel: 'Tencent Cloud job is queued',
+            jobStatus: 'WAIT',
+            jobId: queuedJob.jobId,
+            promptId: queuedJob.jobId,
+            region: queuedJob.region || draft.region,
+            selectedApi: queuedJob.selectedApi || draft.selectedApi,
+            name,
+            prompt,
+            modelVersion: draft.modelVersion,
+            generationType: draft.generationType,
+            polygonType: draft.polygonType,
+            enablePBR: draft.enablePBR,
+            faceCount: Number(draft.faceCount) || 500000
+          }
+        }))
+
+        await refreshProjectAssets()
+        showStatusMessage('Tencent Cloud mesh job submitted.', 'info')
+        return
+      }
+
+      if (isTripoMeshApi) {
+        const queuedTask = await runMeshGenerationApi(projectId, {
+          name,
+          selectedApi: draft.selectedApi,
+          prompt,
+          cardId,
+          modelVersion: draft.modelVersion || 'v2.5-20250123',
+          modelSeed: draft.modelSeed,
+          faceLimit: draft.faceLimit,
+          texture: draft.texture,
+          pbr: draft.pbr,
+          textureSeed: draft.textureSeed,
+          textureQuality: draft.textureQuality || 'standard',
+          autoSize: draft.autoSize,
+          exportUv: draft.exportUv,
+          ...(isTripoP1Model
+            ? {}
+            : {
+                enableImageAutofix: draft.enableImageAutofix,
+                textureAlignment: draft.textureAlignment || 'original_image',
+                orientation: draft.orientation || 'default',
+                quad: draft.quad,
+                smartLowPoly: draft.smartLowPoly,
+                generateParts: draft.generateParts,
+                geometryQuality: draft.geometryQuality || 'standard'
+              })
+        })
+
+        setImageEditProgressByCardId(prev => ({
+          ...prev,
+          [cardId]: {
+            status: 'processing',
+            source: queuedTask.provider || 'Tripo AI',
+            detail: 'Tripo AI task submitted. Use GET RESULT to refresh status.',
+            currentNodeLabel: 'Tripo AI task is queued',
+            taskStatus: 'queued',
+            taskId: queuedTask.taskId,
+            promptId: queuedTask.taskId,
+            selectedApi: queuedTask.selectedApi || draft.selectedApi,
+            name,
+            prompt,
+            modelVersion: draft.modelVersion || 'v2.5-20250123',
+            modelSeed: draft.modelSeed,
+            enableImageAutofix: draft.enableImageAutofix,
+            faceLimit: draft.faceLimit,
+            texture: draft.texture,
+            pbr: draft.pbr,
+            textureSeed: draft.textureSeed,
+            textureAlignment: draft.textureAlignment || 'original_image',
+            textureQuality: draft.textureQuality || 'standard',
+            autoSize: draft.autoSize,
+            orientation: draft.orientation || 'default',
+            quad: draft.quad,
+            smartLowPoly: draft.smartLowPoly,
+            generateParts: draft.generateParts,
+            exportUv: draft.exportUv,
+            geometryQuality: draft.geometryQuality || 'standard'
+          }
+        }))
+
+        await refreshProjectAssets()
+        showStatusMessage('Tripo AI mesh task submitted.', 'info')
+        return
+      }
+
+      // Custom mesh-generation API (runs synchronously and returns the mesh).
+      const generatedMesh = await runMeshGenerationApi(projectId, {
         name,
+        selectedApi: draft.selectedApi,
+        prompt,
         cardId
       })
+      await ensureGeneratedMeshThumbnails(generatedMesh)
       await refreshProjectAssets()
+      showStatusMessage('Mesh generation completed successfully.', 'success')
     } catch (err) {
       console.error('Mesh generation failed:', err)
       setMeshDraft(draft)
       const failureMessage = err.message || 'Mesh generation failed'
       showStatusMessage(failureMessage, 'error')
-      pushExternalApiFailureNotification(
-        'Mesh generation failed',
-        failureMessage,
-        meshGenerationApis.find(api => api.id === draft?.selectedApi)?.name || 'Mesh generation API'
-      )
+      pushExternalApiFailureNotification('Mesh generation failed', failureMessage, providerLabel)
     } finally {
       setPendingMeshGeneration(null)
       setLoading(false)
     }
+  }
+
+  const handleMeshApiDraftChange = (field, value) => {
+    setMeshDraft(prev => {
+      if (!prev) return prev
+
+      const nextDraft = { ...prev, [field]: value }
+
+      if (field === 'selectedApi') {
+        nextDraft.modelVersion = isTripoMeshGenerationApi(value)
+          ? (TRIPO_MODEL_VERSION_OPTIONS.includes(nextDraft.modelVersion) ? nextDraft.modelVersion : 'v2.5-20250123')
+          : (TENCENT_MODEL_VERSION_OPTIONS.includes(nextDraft.modelVersion) ? nextDraft.modelVersion : '3.0')
+      }
+
+      if (field === 'generationType' && value !== 'LowPoly') {
+        nextDraft.polygonType = 'triangle'
+      }
+
+      return nextDraft
+    })
   }
 
   const pushExternalApiFailureNotification = (title, message, source = 'External API') => {
@@ -1521,27 +1663,7 @@ export default function KanbanPage() {
       promptSource: defaultPromptOption.id,
       customPrompt: isCustomPrompt ? '' : defaultPromptOption.value,
       promptValue: isCustomPrompt ? '' : defaultPromptOption.value,
-      region: 'eu-frankfurt',
-      modelVersion: '3.0',
-      enablePBR: false,
-      faceCount: 500000,
-      generationType: 'Normal',
-      polygonType: 'triangle',
-      modelSeed: '',
-      enableImageAutofix: false,
-      faceLimit: '',
-      texture: true,
-      pbr: true,
-      textureSeed: '',
-      textureAlignment: 'original_image',
-      textureQuality: 'standard',
-      autoSize: false,
-      orientation: 'default',
-      quad: false,
-      smartLowPoly: false,
-      generateParts: false,
-      exportUv: true,
-      geometryQuality: 'standard'
+      ...getMeshGenApiDefaults()
     }
   }
 
@@ -2769,7 +2891,7 @@ export default function KanbanPage() {
                     <span className="material-symbols-outlined">account_tree</span>
                     ComfyUI Workflow
                   </button>
-                  <button className="option-btn" onClick={() => setMeshDraft({ mode: 'api', selectedApi: meshGenerationApis[0]?.id || '', prompt: '', name: '' })}>
+                  <button className="option-btn" onClick={() => setMeshDraft({ mode: 'api', selectedApi: meshGenerationApis[0]?.id || '', prompt: '', name: '', ...getMeshGenApiDefaults() })}>
                     <span className="material-symbols-outlined">api</span>
                     Remote API
                   </button>
@@ -2889,30 +3011,43 @@ export default function KanbanPage() {
                   <span className="font-label" style={{ fontSize: '0.65rem', color: 'var(--primary)', marginBottom: '0.5rem' }}>REMOTE API</span>
                   {meshGenerationApis.length > 0 ? (
                     <>
-                      <select
-                        className="api-select"
-                        value={meshDraft.selectedApi}
-                        onChange={e => setMeshDraft({ ...meshDraft, selectedApi: e.target.value })}
-                      >
-                        {meshGenerationApis.map(api => (
-                          <option key={api.id} value={api.id}>{api.name}</option>
-                        ))}
-                      </select>
+                      <div className="params-card__field">
+                        <label className="params-card__label font-label">API</label>
+                        <select
+                          className="image-card__attribute-select"
+                          value={meshDraft.selectedApi}
+                          onChange={e => handleMeshApiDraftChange('selectedApi', e.target.value)}
+                        >
+                          {meshGenerationApis.map(api => (
+                            <option key={api.id} value={api.id}>{api.name}</option>
+                          ))}
+                        </select>
+                      </div>
 
-                      <div className="gen-section">
+                      <div className="params-card__field">
+                        <label className="params-card__label font-label">Name</label>
                         <input
                           type="text"
                           className="params-card__input"
-                          placeholder="Mesh name"
+                          placeholder="Enter mesh name"
                           value={meshDraft.name}
-                          onChange={e => setMeshDraft({ ...meshDraft, name: e.target.value })}
+                          onChange={e => handleMeshApiDraftChange('name', e.target.value)}
                         />
+                      </div>
+
+                      <div className="params-card__field">
+                        <label className="params-card__label font-label">Prompt</label>
                         <textarea
                           className="gen-prompt-input"
                           placeholder="Describe the 3D model to generate"
                           value={meshDraft.prompt}
-                          onChange={e => setMeshDraft({ ...meshDraft, prompt: e.target.value })}
+                          onChange={e => handleMeshApiDraftChange('prompt', e.target.value)}
                         />
+                      </div>
+
+                      <MeshGenApiOptions draft={meshDraft} onChange={handleMeshApiDraftChange} />
+
+                      <div className="gen-section">
                         <button className="gen-btn" onClick={() => handleGenerateMesh(meshDraft)}>
                           <span className="material-symbols-outlined">auto_awesome</span>
                           GENERATE

@@ -78,6 +78,35 @@ export function canFetchTripoMeshResult(runtimeState) {
     && runtimeState?.taskId
 }
 
+// Default values for the provider-specific mesh generation options
+// (Tencent Cloud / Tripo AI). Shared by the per-card action draft and the
+// "Add New Mesh" draft so the two stay in sync.
+export function getMeshGenApiDefaults() {
+  return {
+    region: 'eu-frankfurt',
+    modelVersion: '3.0',
+    enablePBR: false,
+    faceCount: 500000,
+    generationType: 'Normal',
+    polygonType: 'triangle',
+    modelSeed: '',
+    enableImageAutofix: false,
+    faceLimit: '',
+    texture: true,
+    pbr: true,
+    textureSeed: '',
+    textureAlignment: 'original_image',
+    textureQuality: 'standard',
+    autoSize: false,
+    orientation: 'default',
+    quad: false,
+    smartLowPoly: false,
+    generateParts: false,
+    exportUv: true,
+    geometryQuality: 'standard'
+  }
+}
+
 export function getComfyDraftFromWorkflow(workflow) {
   return {
     mode: 'comfy',
