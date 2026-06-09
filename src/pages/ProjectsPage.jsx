@@ -21,6 +21,16 @@ const STATUS_MAP = {
 
 const CHANGE_LOG_ENTRIES = [
   {
+    version: 'v1.0.3',
+    date: '2026-06-09',
+    items: [
+			'Can drag and drop images directly from your computer into your project',
+			'Added "Set as default" checkbox for ComfyUI Workflows',
+			'Kanban page: Can add a mesh directly in Mesh Gen column',
+			'Generated mesh is now a child of parent mesh',
+    ],
+  },
+  {
     version: 'v1.0.2',
     date: '2026-06-05',
     items: [

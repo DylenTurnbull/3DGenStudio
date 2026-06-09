@@ -1,4 +1,4 @@
 {
-	"version": "1.0.2",
-	"message": "Fixed bugs"
+	"version": "1.0.3",
+	"message": "Can drag and drop images from your computer directly in Kanban board and Graph page"
 }
