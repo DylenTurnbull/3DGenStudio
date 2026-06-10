@@ -55,6 +55,7 @@ import {
   bakeViewToTextureGPU,
   bakeMultiViewTextureGPU,
   isGpuBakeSupported,
+  paintProjectionMaskDabGPU,
   solveViewGains
 } from '../utils/gpuTextureBake'
 import {
@@ -133,6 +134,126 @@ import TexturingToolsPanel from '../components/meshEditor/TexturingToolsPanel'
 import ProjectionToolsPanel from '../components/meshEditor/ProjectionToolsPanel'
 import { saveWorkflowDefaults } from '../utils/workflowDefaults'
 import PaintingToolsPanel from '../components/meshEditor/PaintingToolsPanel'
+
+// ── Projection per-layer mask helpers ───────────────────────────────────────
+// A projection layer can carry a user-drawn UV-space mask so the layer's view is
+// applied ONLY where the mask is painted. The mask lives in a canvas the same size
+// (and pixel layout) as the texture canvas, so its alpha aligns 1:1 with the bake's
+// coverageMask — gating happens at composite time, which means the expensive GPU
+// bake stays cached and only the light composite re-runs while drawing (realtime).
+
+// Paint (or erase) a stroke into a layer's mask canvas, mapping UV→canvas and
+// clipping to the hit UV island (same convention as drawUvStroke). Erase uses
+// destination-out so painted coverage is subtracted.
+function stampProjectionMaskStroke(maskCanvas, fromUv, toUv, radius, islandPath, erase, textureConfig) {
+  if (!maskCanvas || !fromUv || !toUv) {
+    return
+  }
+  const context = maskCanvas.getContext('2d', { willReadFrequently: true }) || maskCanvas.getContext('2d')
+  const startPoint = mapUvToCanvasPoint(fromUv, maskCanvas.width, maskCanvas.height, textureConfig)
+  const endPoint = mapUvToCanvasPoint(toUv, maskCanvas.width, maskCanvas.height, textureConfig)
+
+  context.save()
+  // Clip to the UV island ONLY when the stamp point is provably inside it. On
+  // meshes with mirrored/overlapping UVs the island path can wind such that the
+  // hit point reads as outside its own island; clipping there would erase the
+  // whole stamp (→ an empty mask, i.e. nothing visibly happens). Falling back to
+  // an unclipped stamp guarantees the mask is painted. A little cross-chart bleed
+  // is harmless here: gating only takes effect where the layer already has baked
+  // coverage, so mask pixels on faces this view never projected do nothing.
+  if (islandPath && context.isPointInPath(islandPath, endPoint.x, endPoint.y)) {
+    context.clip(islandPath)
+  }
+  context.globalCompositeOperation = erase ? 'destination-out' : 'source-over'
+  context.fillStyle = '#ffffff'
+  context.strokeStyle = '#ffffff'
+  context.lineCap = 'round'
+  context.lineJoin = 'round'
+  context.lineWidth = Math.max(1, radius * 2)
+  context.beginPath()
+  context.moveTo(startPoint.x, startPoint.y)
+  context.lineTo(endPoint.x, endPoint.y)
+  context.stroke()
+  context.beginPath()
+  context.arc(endPoint.x, endPoint.y, Math.max(1, radius), 0, Math.PI * 2)
+  context.fill()
+  context.restore()
+}
+
+// Read a layer's mask canvas into a cached per-texel alpha array (0..255) aligned
+// to the texture/coverage layout. Returns null when the layer has no mask canvas
+// or the mask is empty (all transparent) — in both cases the layer applies its
+// whole view, i.e. the default behaviour. Recomputes only when marked dirty.
+function refreshLayerMaskAlpha(layerData) {
+  const canvas = layerData?.maskCanvas
+  if (!canvas) {
+    return null
+  }
+  if (!layerData.maskDirty && layerData.maskAlpha) {
+    return layerData.maskHasPixels ? layerData.maskAlpha : null
+  }
+  const context = canvas.getContext('2d', { willReadFrequently: true }) || canvas.getContext('2d')
+  const { width, height } = canvas
+  const data = context.getImageData(0, 0, width, height).data
+  const count = width * height
+  const alpha = layerData.maskAlpha && layerData.maskAlpha.length === count
+    ? layerData.maskAlpha
+    : new Uint8Array(count)
+  let hasPixels = false
+  for (let i = 0; i < count; i += 1) {
+    const a = data[i * 4 + 3]
+    alpha[i] = a
+    if (a > 0) {
+      hasPixels = true
+    }
+  }
+  layerData.maskAlpha = alpha
+  layerData.maskHasPixels = hasPixels
+  layerData.maskDirty = false
+  return hasPixels ? alpha : null
+}
+
+// Gate a baked layer snapshot by a mask-alpha array, returning COPIES (the cached
+// snapshot is never mutated). Texels with alpha 0 are dropped from the layer's
+// coverage so lower layers / the base show through; partial alpha scales the
+// texel's opacity for a soft mask edge.
+function gateProjectionSnapshotByMask(snapshot, maskAlpha) {
+  if (!maskAlpha || !snapshot?.coverageMask || !snapshot?.pixelData) {
+    return snapshot
+  }
+  const count = snapshot.coverageMask.length
+  const coverage = new Uint8Array(count)
+  const ownership = snapshot.ownershipMask ? new Uint8Array(count) : null
+  const confidence = snapshot.confidenceMap ? new Float32Array(count) : null
+  const pixelData = new Uint8ClampedArray(snapshot.pixelData)
+  for (let i = 0; i < count; i += 1) {
+    const m = maskAlpha[i]
+    if (m > 0 && snapshot.coverageMask[i]) {
+      coverage[i] = 1
+      if (ownership) ownership[i] = snapshot.ownershipMask[i]
+      if (confidence) confidence[i] = snapshot.confidenceMap[i]
+      if (m < 255) {
+        pixelData[i * 4 + 3] = Math.round((pixelData[i * 4 + 3] || 0) * (m / 255))
+      }
+    } else {
+      pixelData[i * 4 + 3] = 0
+    }
+  }
+  return { ...snapshot, coverageMask: coverage, ownershipMask: ownership, confidenceMap: confidence, pixelData }
+}
+
+// World-space radius for a mask brush of `brushSizePx` screen pixels at the hit
+// point — so the GPU 3D-gated dab covers a footprint that matches the on-screen
+// cursor regardless of zoom/distance.
+function computeProjectionMaskWorldRadius(intersection, camera, canvasHeight, brushSizePx) {
+  if (!camera || !intersection?.point) {
+    return 0.05
+  }
+  const distance = camera.position.distanceTo(intersection.point)
+  const fovRad = (camera.fov || 50) * Math.PI / 180
+  const worldPerPixel = (2 * Math.tan(fovRad / 2) * distance) / Math.max(1, canvasHeight)
+  return Math.max(1e-4, (brushSizePx / 2) * worldPerPixel)
+}
 
 export default function MeshEditorPage() {
   const navigate = useNavigate()
@@ -263,6 +384,19 @@ export default function MeshEditorPage() {
   const projectionLayerCounterRef = useRef(0)
   const projectionRebuildTokenRef = useRef(0)
   const projectionBaseTextureRef = useRef(null)
+  // --- Projection per-layer mask drawing state ---
+  // Id of the layer whose mask is currently being drawn on the mesh (null = off).
+  const [projectionMaskEditLayerId, setProjectionMaskEditLayerId] = useState(null)
+  const [projectionMaskErase, setProjectionMaskErase] = useState(false)
+  const [projectionMaskBrushSize, setProjectionMaskBrushSize] = useState(40)
+  const [projectionMaskCursorPos, setProjectionMaskCursorPos] = useState(null)
+  const projectionMaskStrokeRef = useRef(null)
+  // Last gains solved by a full rebuild, reused by the live (cached) compose so the
+  // colours don't shift while painting a mask.
+  const projectionViewGainsRef = useRef(null)
+  // Throttle guard for the GPU mask brush dab (coalesces pointer moves to one
+  // dab + compose per animation frame).
+  const projectionMaskPaintRef = useRef({ scheduled: false })
   const [imageParamSources, setImageParamSources] = useState({});
   const [showAssetSelector, setShowAssetSelector] = useState(false);
   const [pendingAssetParamId, setPendingAssetParamId] = useState(null);
@@ -2266,6 +2400,167 @@ export default function MeshEditorPage() {
     applySelection('face', [...nextFaces].sort((left, right) => left - right), isMultiSelect)
   }, [activeMenu, applySelection, createRectangleSamplePoints, geometry, selectionMesh, selectionMode])
 
+  // Ensure a projection layer has a mask canvas matching the texture size.
+  const ensureLayerMaskCanvas = useCallback((layerId) => {
+    const layerData = projectionLayerDataRef.current.get(layerId)
+    const textureCanvas = texturableMesh?.textureCanvas
+    if (!layerData || !textureCanvas) {
+      return null
+    }
+    const texW = textureCanvas.width
+    const texH = textureCanvas.height
+    let canvas = layerData.maskCanvas
+    if (!canvas) {
+      canvas = document.createElement('canvas')
+      canvas.width = texW
+      canvas.height = texH
+      layerData.maskCanvas = canvas
+      layerData.maskAlpha = null
+      layerData.maskHasPixels = false
+      layerData.maskDirty = true
+    } else if (canvas.width !== texW || canvas.height !== texH) {
+      canvas.width = texW
+      canvas.height = texH
+      layerData.maskAlpha = null
+      layerData.maskHasPixels = false
+      layerData.maskDirty = true
+    }
+    return canvas
+  }, [texturableMesh])
+
+  // Recompose the projection stack from the CACHED per-layer bakes, applying each
+  // layer's mask. The expensive GPU bake is never re-run here, so this is fast
+  // enough to call live while painting a mask (gives realtime feedback on the mesh).
+  const composeProjectionFromCache = useCallback((layers) => {
+    const mesh = texturableMesh
+    if (!mesh?.textureCanvas || !displayTextureRef.current) {
+      return
+    }
+    const textureCanvas = mesh.textureCanvas
+    const texW = textureCanvas.width
+    const texH = textureCanvas.height
+    const context = textureCanvas.getContext('2d')
+    context.clearRect(0, 0, texW, texH)
+    const baseSnapshot = projectionBaseTextureRef.current
+    if (baseSnapshot && baseSnapshot.width === texW && baseSnapshot.height === texH) {
+      context.drawImage(baseSnapshot, 0, 0)
+    } else {
+      drawProjectionCheckerboard(context, texW, texH)
+    }
+    const composedImage = context.getImageData(0, 0, texW, texH)
+    const layerSnapshots = []
+    const visibleLayers = (layers || []).filter(layer => layer.visible !== false)
+    for (const layer of visibleLayers) {
+      const layerData = projectionLayerDataRef.current.get(layer.id)
+      if (!layerData?.bakedCanvas || !layerData.coverageMask || layerData.coverageMask.length !== texW * texH) {
+        continue
+      }
+      const opacity = Math.max(0, Math.min(1, Number(layer.opacity ?? 1)))
+      if (opacity <= 0) {
+        continue
+      }
+      // Read the baked pixels ONCE per bake (not every frame). The bake canvas only
+      // changes on a full rebuild (new canvas identity), so cache the pixel array and
+      // reuse it across all the live composes a brush stroke triggers.
+      if (layerData.bakedPixelDataSource !== layerData.bakedCanvas
+        || !layerData.bakedPixelData
+        || layerData.bakedPixelData.length !== texW * texH * 4) {
+        const bakedContext = layerData.bakedCanvas.getContext('2d', { willReadFrequently: true }) || layerData.bakedCanvas.getContext('2d')
+        layerData.bakedPixelData = bakedContext.getImageData(0, 0, texW, texH).data
+        layerData.bakedPixelDataSource = layerData.bakedCanvas
+      }
+      let snapshot = {
+        pixelData: layerData.bakedPixelData,
+        coverageMask: layerData.coverageMask,
+        ownershipMask: layerData.ownershipMask,
+        sharedSeamMask: layerData.sharedSeamMask,
+        confidenceMap: layerData.confidenceMap,
+        opacity,
+        opacitySeams: Math.max(0, Math.min(1, Number(layer.opacitySeams ?? 1))),
+        blendMode: layer.blendMode || 'source-over',
+        blendPixels: Math.max(AUTO_PROJECTION_SEAM_SAFE_BLEND_PX, layer.blendPixels || 0)
+      }
+      const maskAlpha = refreshLayerMaskAlpha(layerData)
+      if (maskAlpha) {
+        snapshot = gateProjectionSnapshotByMask(snapshot, maskAlpha)
+      }
+      layerSnapshots.push(snapshot)
+    }
+    resolveProjectionLayersIntoImageData(composedImage.data, layerSnapshots, texW, texH, projectionViewGainsRef.current, projectionUvOccupancyRef.current)
+    context.putImageData(composedImage, 0, 0)
+    projectionLayerSnapshotsRef.current = layerSnapshots
+    // Flag the texture for re-upload WITHOUT bumping textureRevision: the live mask
+    // preview must not remount <TexturedMesh> (which deep-clones the whole mesh). The
+    // mounted material's map IS this texture object, and frameloop="always" re-uploads
+    // it from needsUpdate every frame, so the mesh updates with no clone per frame.
+    updateCanvasTexture(displayTextureRef.current)
+  }, [texturableMesh])
+
+  // Paint the pending brush dab (capsule [lastPoint3D → pendingPoint3D]) into the
+  // layer's mask canvas — GPU 3D-gated (seam-safe), with a UV-stamp CPU fallback.
+  const paintProjectionMaskDabNow = useCallback((stroke, layerData) => {
+    const maskCanvas = layerData?.maskCanvas
+    if (!stroke || !maskCanvas || !texturableMesh?.root) {
+      return false
+    }
+    const target = stroke.pendingPoint3D || stroke.lastPoint3D
+    if (!target) {
+      return false
+    }
+    const dab = paintProjectionMaskDabGPU({
+      root: texturableMesh.root,
+      textureKey: texturableMesh.textureKey,
+      textureConfig: texturableMesh.textureConfig,
+      hitA: stroke.lastPoint3D || target,
+      hitB: target,
+      radiusWorld: stroke.radiusWorld,
+      textureWidth: maskCanvas.width,
+      textureHeight: maskCanvas.height
+    })
+    const maskCtx = maskCanvas.getContext('2d')
+    if (dab) {
+      // GPU 3D-gated dab: union for draw, subtract for erase.
+      maskCtx.globalCompositeOperation = stroke.erase ? 'destination-out' : 'source-over'
+      maskCtx.drawImage(dab, 0, 0)
+      maskCtx.globalCompositeOperation = 'source-over'
+    } else if (stroke.pendingUv) {
+      // CPU fallback (GPU unavailable): UV-space stamp (can bleed at seams).
+      stampProjectionMaskStroke(
+        maskCanvas,
+        stroke.pendingFromUv || stroke.pendingUv,
+        stroke.pendingUv,
+        stroke.textureRadius || 16,
+        stroke.pendingIslandPath || null,
+        stroke.erase,
+        texturableMesh.textureConfig
+      )
+    }
+    stroke.lastPoint3D = target.clone ? target.clone() : target
+    stroke.pendingPoint3D = null
+    layerData.maskDirty = true
+    return true
+  }, [texturableMesh])
+
+  // Coalesce pointer moves to one dab + one compose per animation frame.
+  const scheduleProjectionMaskPaint = useCallback(() => {
+    const state = projectionMaskPaintRef.current
+    if (state.scheduled) {
+      return
+    }
+    state.scheduled = true
+    requestAnimationFrame(() => {
+      state.scheduled = false
+      const stroke = projectionMaskStrokeRef.current
+      const layerId = projectionMaskEditLayerId
+      const layerData = layerId ? projectionLayerDataRef.current.get(layerId) : null
+      if (!stroke || !layerData) {
+        return
+      }
+      paintProjectionMaskDabNow(stroke, layerData)
+      composeProjectionFromCache(projectionLayers)
+    })
+  }, [composeProjectionFromCache, paintProjectionMaskDabNow, projectionLayers, projectionMaskEditLayerId])
+
   const getPointerPosition = useCallback((event) => {
     const rect = canvasShellRef.current?.getBoundingClientRect()
 
@@ -2417,6 +2712,44 @@ export default function MeshEditorPage() {
       })
 
       shell.setPointerCapture?.(event.pointerId)
+      return
+    }
+
+    // Projection mask drawing: paint (left-drag) the active layer's mask directly on
+    // the mesh. Middle/right-drag still orbits (OrbitControls LEFT is disabled).
+    if (activeMenu === 'projection' && projectionMaskEditLayerId) {
+      if (!texturableMesh?.root) {
+        return
+      }
+      const intersection = getMeshIntersection(nextPoint, texturableMesh.root)
+      if (!intersection?.uv || !intersection?.point) {
+        setFeedback('Mask drawing: aim the cursor at the mesh surface, then left-drag.')
+        return
+      }
+      event.preventDefault()
+      const layerData = projectionLayerDataRef.current.get(projectionMaskEditLayerId)
+      const maskCanvas = ensureLayerMaskCanvas(projectionMaskEditLayerId)
+      if (!layerData || !maskCanvas) {
+        return
+      }
+      const rect0 = canvasShellRef.current?.getBoundingClientRect()
+      const point3D = intersection.point.clone()
+      const uvPoint = intersection.uv.clone()
+      // Stroke state: the GPU dab gates by WORLD distance to [lastPoint3D, pendingPoint3D]
+      // (capsule) so it never bleeds across UV seams. UV fields are CPU fallback only.
+      projectionMaskStrokeRef.current = {
+        pointerId: event.pointerId,
+        erase: projectionMaskErase,
+        radiusWorld: computeProjectionMaskWorldRadius(intersection, cameraRef.current, rect0?.height ?? 1, projectionMaskBrushSize),
+        lastPoint3D: point3D,
+        pendingPoint3D: point3D,
+        pendingUv: uvPoint,
+        pendingFromUv: uvPoint,
+        pendingIslandPath: getUvIslandHitInfo(texturableMesh, intersection)?.path || null,
+        textureRadius: computePaintBrushTexturePx(projectionMaskBrushSize, cameraRef.current, rect0?.height ?? 1, intersection, maskCanvas.width, maskCanvas.height)
+      }
+      canvasShellRef.current?.setPointerCapture?.(event.pointerId)
+      scheduleProjectionMaskPaint()
       return
     }
 
@@ -2575,7 +2908,7 @@ export default function MeshEditorPage() {
     }
 
     canvasShellRef.current?.setPointerCapture?.(event.pointerId)
-  }, [activeMenu, applySculptStamp, beginPaintStroke, booleanPlaceMode, booleanStampBasis, brushSize, computeSculptCursorPixelRadius, ensureSculptMesh, getMeshIntersection, getPointerPosition, numericAssetId, paintBrushSize, paintColor, paintFlow, paintHardness, paintLayers, paintMode, paintRotation, pendingPatch, pushSculptUndo, resetSelection, sculptBrush, sculptFrontFacesOnly, sculptHardness, sculptSize, sculptStampRotation, sculptSymmetry, selectedLayerId, selectionMesh, stampBrushAtUv, syncProjectionMaskCanvasSize, texturableMesh, texturingReady])
+  }, [activeMenu, applySculptStamp, beginPaintStroke, booleanPlaceMode, booleanStampBasis, brushSize, computeSculptCursorPixelRadius, ensureLayerMaskCanvas, ensureSculptMesh, getMeshIntersection, getPointerPosition, numericAssetId, paintBrushSize, paintColor, paintFlow, paintHardness, paintLayers, paintMode, paintRotation, pendingPatch, projectionMaskBrushSize, projectionMaskEditLayerId, projectionMaskErase, pushSculptUndo, resetSelection, scheduleProjectionMaskPaint, sculptBrush, sculptFrontFacesOnly, sculptHardness, sculptSize, sculptStampRotation, sculptSymmetry, selectedLayerId, selectionMesh, stampBrushAtUv, syncProjectionMaskCanvasSize, texturableMesh, texturingReady])
 
   const handleCanvasPointerMove = useCallback((event) => {
     if (activeMenu === 'boolean' && booleanPlaceMode) {
@@ -2749,6 +3082,46 @@ export default function MeshEditorPage() {
       return
     }
 
+    if (activeMenu === 'projection' && projectionMaskEditLayerId) {
+      // Update brush cursor preview (always while pointer is over the canvas).
+      const shell = canvasShellRef.current
+      if (shell) {
+        const rect = shell.getBoundingClientRect()
+        setProjectionMaskCursorPos({ x: event.clientX - rect.left, y: event.clientY - rect.top })
+      }
+
+      const stroke = projectionMaskStrokeRef.current
+      if (!stroke || !texturableMesh?.root) {
+        return
+      }
+      const nextPoint = getPointerPosition(event)
+      if (!nextPoint) {
+        return
+      }
+      const intersection = getMeshIntersection(nextPoint, texturableMesh.root)
+      if (!intersection?.uv || !intersection?.point) {
+        return
+      }
+      const paintRect = canvasShellRef.current?.getBoundingClientRect()
+      // Push the latest segment endpoint + brush footprint into the stroke; the
+      // throttled rAF paints the capsule [lastPoint3D → pendingPoint3D] on the GPU.
+      stroke.radiusWorld = computeProjectionMaskWorldRadius(intersection, cameraRef.current, paintRect?.height ?? 1, projectionMaskBrushSize)
+      stroke.pendingFromUv = stroke.pendingUv || intersection.uv.clone()
+      stroke.pendingUv = intersection.uv.clone()
+      stroke.pendingIslandPath = getUvIslandHitInfo(texturableMesh, intersection)?.path || null
+      stroke.textureRadius = computePaintBrushTexturePx(
+        projectionMaskBrushSize,
+        cameraRef.current,
+        paintRect?.height ?? 1,
+        intersection,
+        texturableMesh.textureCanvas?.width ?? 1024,
+        texturableMesh.textureCanvas?.height ?? 1024
+      )
+      stroke.pendingPoint3D = intersection.point.clone()
+      scheduleProjectionMaskPaint()
+      return
+    }
+
     if (activeMenu === 'painting') {
       // Update brush cursor preview (always while pointer is over the canvas)
       const shell = canvasShellRef.current
@@ -2893,7 +3266,7 @@ export default function MeshEditorPage() {
       startPoint: dragStateRef.current.startPoint,
       endPoint: nextPoint
     })
-  }, [activeMenu, applySculptStamp, booleanPlaceMode, brushSize, computeSculptCursorPixelRadius, ensureSculptMesh, getMeshIntersection, getPointerPosition, paintBrushSize, paintColor, paintFlow, paintHardness, paintMode, paintRotation, recompositePaintTexture, sculptSpacing, sculptSteadyStroke, sculptStrength, selectionMesh, stampBrushAtUv, texturableMesh, updateMaskOverlay])
+  }, [activeMenu, applySculptStamp, booleanPlaceMode, brushSize, computeSculptCursorPixelRadius, ensureSculptMesh, getMeshIntersection, getPointerPosition, paintBrushSize, paintColor, paintFlow, paintHardness, paintMode, paintRotation, projectionMaskBrushSize, projectionMaskEditLayerId, projectionMaskErase, recompositePaintTexture, scheduleProjectionMaskPaint, sculptSpacing, sculptSteadyStroke, sculptStrength, selectionMesh, stampBrushAtUv, texturableMesh, updateMaskOverlay])
 
   const handleCanvasPointerUp = useCallback((event) => {
     if (activeMenu === 'sculpting') {
@@ -2913,6 +3286,34 @@ export default function MeshEditorPage() {
       }
       // Bumping geometryRevision keeps stats / texture-mode warnings in sync.
       setGeometryRevision(rev => rev + 1)
+      return
+    }
+
+    if (activeMenu === 'projection' && projectionMaskStrokeRef.current) {
+      if (event.button !== 0) {
+        return
+      }
+      const stroke = projectionMaskStrokeRef.current
+      canvasShellRef.current?.releasePointerCapture?.(stroke.pointerId)
+      const layerId = projectionMaskEditLayerId
+      const layerData = layerId ? projectionLayerDataRef.current.get(layerId) : null
+      // Flush the final segment (between the last move and release) so the stroke end
+      // isn't dropped, then clear stroke state.
+      if (layerData) {
+        paintProjectionMaskDabNow(stroke, layerData)
+      }
+      projectionMaskStrokeRef.current = null
+      // Reflect whether the layer now has a usable mask so the card UI can enable
+      // Clear and show the active state. No full rebuild needed — the live compose
+      // already produced the masked result and the bakes are unchanged.
+      if (layerData) {
+        refreshLayerMaskAlpha(layerData)
+        const hasMask = !!layerData.maskHasPixels
+        setProjectionLayers(current => current.map(layer => (
+          layer.id === layerId && layer.hasMask !== hasMask ? { ...layer, hasMask } : layer
+        )))
+        composeProjectionFromCache(projectionLayers)
+      }
       return
     }
 
@@ -2950,7 +3351,7 @@ export default function MeshEditorPage() {
     canvasShellRef.current?.releasePointerCapture?.(dragStateRef.current.pointerId)
     dragStateRef.current = null
     setSelectionBox(null)
-  }, [activeMenu, getPointerPosition, recompositePaintTexture, selectAtPoint, selectWithinRectangle])
+  }, [activeMenu, composeProjectionFromCache, getPointerPosition, paintProjectionMaskDabNow, projectionLayers, projectionMaskEditLayerId, recompositePaintTexture, selectAtPoint, selectWithinRectangle])
 
   const handleCanvasPointerCancel = useCallback(() => {
     if (sculptStrokeRef.current) {
@@ -2970,6 +3371,10 @@ export default function MeshEditorPage() {
     if (paintStateRef.current) {
       canvasShellRef.current?.releasePointerCapture?.(paintStateRef.current.pointerId)
       paintStateRef.current = null
+    }
+    if (projectionMaskStrokeRef.current) {
+      canvasShellRef.current?.releasePointerCapture?.(projectionMaskStrokeRef.current.pointerId)
+      projectionMaskStrokeRef.current = null
     }
 
     dragStateRef.current = null
@@ -3669,7 +4074,7 @@ export default function MeshEditorPage() {
           const bakedContext = layerData.bakedCanvas.getContext('2d', { willReadFrequently: true }) || layerData.bakedCanvas.getContext('2d')
           const bakedImage = bakedContext.getImageData(0, 0, texW, texH)
 
-          layerSnapshots.push({
+          let snapshot = {
             pixelData: bakedImage.data,
             coverageMask: layerCoverage,
             ownershipMask: layerOwnership,
@@ -3679,7 +4084,14 @@ export default function MeshEditorPage() {
             opacitySeams: layerOpacitySeams,
             blendMode: layerBlendMode,
             blendPixels: effectiveBlendPixels
-          })
+          }
+          // Gate the layer by its user-drawn mask (if any): the view is applied only
+          // where the mask is painted; elsewhere lower layers / the base show through.
+          const maskAlpha = refreshLayerMaskAlpha(layerData)
+          if (maskAlpha) {
+            snapshot = gateProjectionSnapshotByMask(snapshot, maskAlpha)
+          }
+          layerSnapshots.push(snapshot)
         }
 
         const overall = (layerIndex + 1) / totalVisibleLayers
@@ -3741,6 +4153,10 @@ export default function MeshEditorPage() {
         }
       }
 
+      // Cache the solved gains so the live (mask-drawing) compose reuses them and
+      // the colours stay stable while painting, instead of snapping to identity.
+      projectionViewGainsRef.current = viewGains
+
       resolveProjectionLayersIntoImageData(composedData, layerSnapshots, texW, texH, viewGains, projectionUvOccupancyRef.current)
       textureContext.putImageData(composedImage, 0, 0)
       projectionLayerSnapshotsRef.current = layerSnapshots
@@ -3790,14 +4206,59 @@ export default function MeshEditorPage() {
     void rebuildProjectionTexture(projectionLayersForRebuild, { announce: false })
   }, [projectionLayersForRebuild, projectionStarted, rebuildProjectionTexture, texturableMesh])
 
+  // Leaving Projection mode cancels any in-progress mask drawing.
+  useEffect(() => {
+    if (activeMenu !== 'projection' && projectionMaskEditLayerId) {
+      projectionMaskStrokeRef.current = null
+      setProjectionMaskEditLayerId(null)
+      setProjectionMaskCursorPos(null)
+    }
+  }, [activeMenu, projectionMaskEditLayerId])
+
   const handleUpdateProjectionLayer = useCallback((id, updates) => {
     setProjectionLayers(current => current.map(layer => layer.id === id ? { ...layer, ...updates } : layer))
   }, [])
 
   const handleDeleteProjectionLayer = useCallback((id) => {
     projectionLayerDataRef.current.delete(id)
+    setProjectionMaskEditLayerId(current => (current === id ? null : current))
     setProjectionLayers(current => current.filter(layer => layer.id !== id))
   }, [])
+
+  // Enter mask-drawing mode for a layer (or toggle it off if already active).
+  const handleToggleProjectionMaskDraw = useCallback((layerId) => {
+    setProjectionMaskEditLayerId(current => {
+      if (current === layerId) {
+        return null
+      }
+      ensureLayerMaskCanvas(layerId)
+      return layerId
+    })
+    setProjectionMaskCursorPos(null)
+  }, [ensureLayerMaskCanvas])
+
+  const handleExitProjectionMaskDraw = useCallback(() => {
+    projectionMaskStrokeRef.current = null
+    setProjectionMaskEditLayerId(null)
+    setProjectionMaskCursorPos(null)
+  }, [])
+
+  // Clear a layer's mask → the layer applies its whole view again (default).
+  const handleClearProjectionLayerMask = useCallback((layerId) => {
+    const layerData = projectionLayerDataRef.current.get(layerId)
+    if (layerData?.maskCanvas) {
+      const ctx = layerData.maskCanvas.getContext('2d')
+      ctx.clearRect(0, 0, layerData.maskCanvas.width, layerData.maskCanvas.height)
+      layerData.maskDirty = true
+      layerData.maskHasPixels = false
+      layerData.maskAlpha = null
+    }
+    setProjectionLayers(current => current.map(layer => (
+      layer.id === layerId && layer.hasMask ? { ...layer, hasMask: false } : layer
+    )))
+    // Re-show the full view immediately from the cached bakes.
+    composeProjectionFromCache(projectionLayers)
+  }, [composeProjectionFromCache, projectionLayers])
 
   const handleMoveProjectionLayer = useCallback((id, direction) => {
     setProjectionLayers(current => {
@@ -3888,6 +4349,9 @@ export default function MeshEditorPage() {
     projectionFaceOwnershipRef.current.clear()
     projectionLayerDataRef.current.clear()
     projectionLayerCounterRef.current = 0
+    projectionViewGainsRef.current = null
+    setProjectionMaskEditLayerId(null)
+    setProjectionMaskCursorPos(null)
     setProjectionLayers([])
     setProjectionKeepTexture(keepTexture)
     setProjectionStarted(true)
@@ -4262,6 +4726,7 @@ export default function MeshEditorPage() {
           blendPixels: initialBlendPixels,
           cropBorder: initialCropBorder,
           visible: true,
+          hasMask: false,
           sendResolution
         }
       ]))
@@ -5005,7 +5470,7 @@ export default function MeshEditorPage() {
               onPointerMove={handleCanvasPointerMove}
               onPointerUp={handleCanvasPointerUp}
               onPointerCancel={handleCanvasPointerCancel}
-              onPointerLeave={() => { setPaintCursorPos(null); setSculptCursor(null); }}
+              onPointerLeave={() => { setPaintCursorPos(null); setSculptCursor(null); setProjectionMaskCursorPos(null); }}
             >
               <canvas
                 ref={projectionMaskCanvasRef}
@@ -5176,6 +5641,17 @@ export default function MeshEditorPage() {
                           ? paintBrushSize
                           : paintBrushSize * (paintBrushNaturalSize.height / paintBrushNaturalSize.width))
                       : paintBrushSize
+                  }}
+                />
+              )}
+              {activeMenu === 'projection' && projectionMaskEditLayerId && projectionMaskCursorPos && (
+                <div
+                  className="mesh-editor-paint-cursor"
+                  style={{
+                    left: projectionMaskCursorPos.x,
+                    top: projectionMaskCursorPos.y,
+                    width: projectionMaskBrushSize,
+                    height: projectionMaskBrushSize
                   }}
                 />
               )}
@@ -5471,6 +5947,71 @@ export default function MeshEditorPage() {
                             <span>Capture</span>
                             <strong>{layer.sendResolution}px</strong>
                           </div>
+
+                          {/* Per-layer mask: apply this view only where painted on the mesh. */}
+                          <div className="mesh-editor-layer-card__row" style={{ gap: '0.4rem' }}>
+                            <button
+                              type="button"
+                              className={`mesh-editor-btn ${projectionMaskEditLayerId === layer.id ? 'mesh-editor-btn--primary' : 'mesh-editor-btn--ghost'}`}
+                              style={{ flex: 1 }}
+                              onClick={() => handleToggleProjectionMaskDraw(layer.id)}
+                              disabled={projectionRebuilding}
+                              title="Paint a mask on the mesh; the view is applied only where you draw"
+                            >
+                              <span className="material-symbols-outlined">brush</span>
+                              <span>{projectionMaskEditLayerId === layer.id ? 'Drawing…' : 'Draw Mask'}</span>
+                            </button>
+                            <button
+                              type="button"
+                              className="mesh-editor-btn mesh-editor-btn--ghost"
+                              style={{ flex: 1 }}
+                              onClick={() => handleClearProjectionLayerMask(layer.id)}
+                              disabled={projectionRebuilding || !layer.hasMask}
+                              title="Remove the mask so the whole view is applied again"
+                            >
+                              <span className="material-symbols-outlined">layers_clear</span>
+                              <span>Clear Mask</span>
+                            </button>
+                          </div>
+
+                          {projectionMaskEditLayerId === layer.id && (
+                            <>
+                              <div className="mesh-editor-layer-card__row">
+                                <span>Draw size</span>
+                                <input
+                                  type="range" min="4" max="256" step="1"
+                                  value={projectionMaskBrushSize}
+                                  onChange={e => setProjectionMaskBrushSize(Number(e.target.value))}
+                                />
+                                <strong>{projectionMaskBrushSize}px</strong>
+                              </div>
+                              <div className="mesh-editor-layer-card__row" style={{ gap: '0.4rem' }}>
+                                <button
+                                  type="button"
+                                  className={`mesh-editor-btn ${projectionMaskErase ? 'mesh-editor-btn--primary' : 'mesh-editor-btn--ghost'}`}
+                                  style={{ flex: 1 }}
+                                  onClick={() => setProjectionMaskErase(value => !value)}
+                                  title="Toggle erase: subtract from the mask to keep the view everywhere except the erased parts"
+                                >
+                                  <span className="material-symbols-outlined">{projectionMaskErase ? 'ink_eraser' : 'edit'}</span>
+                                  <span>{projectionMaskErase ? 'Erasing' : 'Erase'}</span>
+                                </button>
+                                <button
+                                  type="button"
+                                  className="mesh-editor-btn mesh-editor-btn--secondary"
+                                  style={{ flex: 1 }}
+                                  onClick={handleExitProjectionMaskDraw}
+                                >
+                                  <span className="material-symbols-outlined">close</span>
+                                  <span>Exit</span>
+                                </button>
+                              </div>
+                              <div className="mesh-editor-layer-card__dirty-note">
+                                Left-drag on the mesh to {projectionMaskErase ? 'erase' : 'draw'} the mask. Middle/right-drag still orbits.
+                              </div>
+                            </>
+                          )}
+
                           {isDirty && (
                             <div className="mesh-editor-layer-card__dirty-note">Modified</div>
                           )}

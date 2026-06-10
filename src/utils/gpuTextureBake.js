@@ -1124,6 +1124,123 @@ export async function bakeViewToTextureGPU(params) {
   }
 }
 
+// ── Mask paint shader (3D-gated brush) ───────────────────────────────────────
+// Rasterises the mesh in UV space (same aTexUV placement as the bake) and writes
+// solid coverage where the texel's WORLD position lies within uRadius of the 3D
+// brush segment [uHitA,uHitB]. Gating by WORLD distance — not UV distance — means a
+// texel that is near in UV but far in 3D (mirrored/overlapping UV islands, or the
+// far side of a thin part) is rejected. That is the structural fix for mask seam
+// bleed: a stroke paints exactly the surface under the brush in 3D, regardless of
+// how the UVs are laid out, and never leaks across a UV seam (nor gaps at one).
+const MASK_PAINT_VERT = /* glsl */`precision highp float;
+in vec3 position;
+in vec2 aTexUV;
+uniform mat4 uModel;
+out vec3 vWorldPos;
+void main() {
+  vWorldPos = (uModel * vec4(position, 1.0)).xyz;
+  gl_Position = vec4(aTexUV * 2.0 - 1.0, 0.0, 1.0);
+}
+`
+
+const MASK_PAINT_FRAG = /* glsl */`precision highp float;
+in vec3 vWorldPos;
+uniform vec3 uHitA;
+uniform vec3 uHitB;
+uniform float uRadius;
+out vec4 outColor;
+void main() {
+  // Distance from this texel's world position to the brush segment (capsule), so a
+  // fast drag between frames paints a gap-free stroke from one rAF point dab.
+  vec3 ab = uHitB - uHitA;
+  float t = clamp(dot(vWorldPos - uHitA, ab) / max(dot(ab, ab), 1e-8), 0.0, 1.0);
+  float d = distance(vWorldPos, uHitA + t * ab);
+  if (d > uRadius) discard;
+  outColor = vec4(1.0);
+}
+`
+
+let maskPaintMaterial = null
+function getMaskPaintMaterial() {
+  if (!maskPaintMaterial) {
+    maskPaintMaterial = new THREE.RawShaderMaterial({
+      glslVersion: THREE.GLSL3,
+      vertexShader: MASK_PAINT_VERT,
+      fragmentShader: MASK_PAINT_FRAG,
+      blending: THREE.NoBlending,
+      depthTest: false,
+      depthWrite: false,
+      side: THREE.DoubleSide,
+      uniforms: {
+        uModel: { value: new THREE.Matrix4() },
+        uHitA: { value: new THREE.Vector3() },
+        uHitB: { value: new THREE.Vector3() },
+        uRadius: { value: 0.05 }
+      }
+    })
+  }
+  return maskPaintMaterial
+}
+
+// Public: paint one brush dab into a coverage canvas on the GPU. Returns a canvas
+// (textureWidth×textureHeight) — opaque white where covered, fully transparent
+// elsewhere, in the texture-canvas pixel layout (identical to the bake output) — or
+// null if the GPU path is unavailable. The caller composites it onto the layer's
+// persistent mask canvas (source-over to add, destination-out to erase).
+export function paintProjectionMaskDabGPU(params) {
+  if (!isGpuBakeSupported()) return null
+  const {
+    meshes, root, textureKey, textureConfig,
+    hitA, hitB = hitA, radiusWorld,
+    textureWidth, textureHeight
+  } = params
+  if (!hitA || !radiusWorld || !textureWidth || !textureHeight) return null
+  const meshList = collectMeshes(meshes, root, textureKey)
+  if (!meshList.length) return null
+
+  const renderer = getBakeRenderer()
+  const bakeGeoms = []
+  for (const mesh of meshList) {
+    mesh.updateMatrixWorld?.(true)
+    const geom = buildBakeGeometry(mesh.geometry, textureConfig)
+    if (geom) bakeGeoms.push({ geom, matrixWorld: mesh.matrixWorld.clone() })
+  }
+  if (!bakeGeoms.length) return null
+
+  const target = makeByteTarget(textureWidth, textureHeight)
+  const mat = getMaskPaintMaterial()
+  const u = mat.uniforms
+  u.uHitA.value.copy(hitA)
+  u.uHitB.value.copy(hitB || hitA)
+  u.uRadius.value = radiusWorld
+
+  try {
+    const scene = new THREE.Scene()
+    bakeGeoms.forEach(({ geom, matrixWorld }) => {
+      const proxy = new THREE.Mesh(geom, mat)
+      proxy.matrixAutoUpdate = false
+      proxy.matrixWorld.copy(matrixWorld)
+      proxy.onBeforeRender = () => { u.uModel.value.copy(matrixWorld) }
+      proxy.frustumCulled = false
+      scene.add(proxy)
+    })
+    const camera = new THREE.Camera() // unused; the vertex shader places texels in UV space
+    renderer.setRenderTarget(target)
+    renderer.setClearColor(0x000000, 0)
+    renderer.clear(true, true, false)
+    renderer.render(scene, camera)
+    renderer.setRenderTarget(null)
+    scene.clear()
+    return byteTargetToCanvas(renderer, target, textureWidth, textureHeight, false)
+  } catch (err) {
+    console.warn('[gpuTextureBake] mask dab failed:', err)
+    return null
+  } finally {
+    bakeGeoms.forEach(({ geom }) => geom.dispose())
+    target.dispose()
+  }
+}
+
 // ── Public: unified multi-view bake (Steps 1–5) ──────────────────────────────
 // Accumulates ALL views into one float target with a per-texel visibility gate
 // and steep cosine weight, resolves, then JFA-dilates the gutter. This replaces
