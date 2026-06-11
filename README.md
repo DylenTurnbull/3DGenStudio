@@ -19,6 +19,7 @@
 
 | Date | Description |
 | --- | --- |
+| **2026-06-12** | MeshEditor - Projection : Can use a Mask<br>Textbox : Can use a ComfyUI workflow to generate a text |
 | **2026-06-09** | Can drag and drop images directly from your computer into your project<br>Added "Set as default" checkbox for ComfyUI Workflows<br>Kanban page: Can add a mesh directly in Mesh Gen column<br>Generated mesh is now a child of parent mesh |
 | **2026-06-05** | Refactored the code<br>Fixed MeshEditor<br>Added more workflows |
 | **2026-06-03** | Mesh Editor - Projection Mode: GPU Processing and Improved seams<br>Image Editor: New ComfyUI mode in AI<br>Graph page: Text node can generate text with ComfyUI<br>Setup Wizard: Added Flux2Dev and Flux2Klein9B |

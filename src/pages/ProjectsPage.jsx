@@ -21,6 +21,14 @@ const STATUS_MAP = {
 
 const CHANGE_LOG_ENTRIES = [
   {
+    version: 'v1.0.4',
+    date: '2026-06-12',
+    items: [
+			'Textbox: Generate text with a ComfyUI workflow',
+			'MeshEditor - Projection: Can use Mask',
+    ],
+  },
+  {
     version: 'v1.0.3',
     date: '2026-06-09',
     items: [
