@@ -3,7 +3,7 @@
     "inputs": {
       "shift": 3.1,
       "model": [
-        "37",
+        "13",
         0
       ]
     },
@@ -403,20 +403,6 @@
     "class_type": "RMBG",
     "_meta": {
       "title": "Remove Background (RMBG)"
-    }
-  },
-  "37": {
-    "inputs": {
-      "lora_name": "QIE-2511-Studio-DeLight-5000.safetensors",
-      "strength_model": 1,
-      "model": [
-        "13",
-        0
-      ]
-    },
-    "class_type": "LoraLoaderModelOnly",
-    "_meta": {
-      "title": "Load LoRA"
     }
   },
   "38": {

@@ -1189,6 +1189,54 @@ export async function fillHolesPostProcessing(textureCanvas, layerSnapshots, tex
     }
   }
 
+  // ── PASS 3: UV-gutter edge-padding ──
+  // Texels just outside an island border are inside no triangle, so PASS 2
+  // leaves them transparent. Bilinear texture sampling then reaches past the
+  // island edge and pulls those transparent texels in as white seam lines.
+  // Pad covered/filled colour a few texels into the transparent gutter so the
+  // bilinear tap stays on real colour (the same edge-pad the main projection
+  // composite applies; the hole-fill output lacked it).
+  const PAD_PIXELS = 4
+  const alphaMask = new Uint8Array(pixelCount)
+  for (let i = 0; i < pixelCount; i++) alphaMask[i] = outData[i * 4 + 3] > 0 ? 1 : 0
+
+  for (let pass = 0; pass < PAD_PIXELS; pass++) {
+    const ring = []
+    for (let py = 0; py < h; py++) {
+      for (let px = 0; px < w; px++) {
+        const i = py * w + px
+        if (alphaMask[i]) continue
+        // Average the colour of opaque 8-neighbours committed in a prior ring
+        // (alphaMask only updates after the full pass → clean ring growth, no
+        // intra-pass cascade bias).
+        let sr = 0, sg = 0, sb = 0, n = 0
+        for (let dy = -1; dy <= 1; dy++) {
+          const ny = py + dy
+          if (ny < 0 || ny >= h) continue
+          for (let dx = -1; dx <= 1; dx++) {
+            if (!dx && !dy) continue
+            const nx = px + dx
+            if (nx < 0 || nx >= w) continue
+            const ni = ny * w + nx
+            if (!alphaMask[ni]) continue
+            const nj = ni * 4
+            sr += outData[nj]; sg += outData[nj + 1]; sb += outData[nj + 2]; n++
+          }
+        }
+        if (n > 0) {
+          const j = i * 4
+          outData[j]     = Math.round(sr / n)
+          outData[j + 1] = Math.round(sg / n)
+          outData[j + 2] = Math.round(sb / n)
+          outData[j + 3] = 255
+          ring.push(i)
+        }
+      }
+    }
+    if (ring.length === 0) break
+    for (let k = 0; k < ring.length; k++) alphaMask[ring[k]] = 1
+  }
+
   if (onProgress) onProgress(1)
   ctx.putImageData(new ImageData(outData, w, h), 0, 0)
 }

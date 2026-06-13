@@ -3,7 +3,7 @@
     "inputs": {
       "shift": 3.1,
       "model": [
-        "37",
+        "13",
         0
       ]
     },
@@ -405,20 +405,6 @@
       "title": "Remove Background (RMBG)"
     }
   },
-  "37": {
-    "inputs": {
-      "lora_name": "QIE-2511-Studio-DeLight-5000.safetensors",
-      "strength_model": 1,
-      "model": [
-        "13",
-        0
-      ]
-    },
-    "class_type": "LoraLoaderModelOnly",
-    "_meta": {
-      "title": "Load LoRA"
-    }
-  },
   "78": {
     "inputs": {
       "model_name": "4x-UltraSharpV2.pth"
@@ -455,47 +441,6 @@
       "title": "Empty Flux 2 Latent"
     }
   },
-  "77:64": {
-    "inputs": {
-      "noise": [
-        "77:71",
-        0
-      ],
-      "guider": [
-        "77:70",
-        0
-      ],
-      "sampler": [
-        "77:67",
-        0
-      ],
-      "sigmas": [
-        "77:69",
-        0
-      ],
-      "latent_image": [
-        "77:63",
-        0
-      ]
-    },
-    "class_type": "SamplerCustomAdvanced",
-    "_meta": {
-      "title": "SamplerCustomAdvanced"
-    }
-  },
-  "77:66": {
-    "inputs": {
-      "text": "",
-      "clip": [
-        "77:75",
-        0
-      ]
-    },
-    "class_type": "CLIPTextEncode",
-    "_meta": {
-      "title": "CLIP Text Encode (Negative Prompt)"
-    }
-  },
   "77:67": {
     "inputs": {
       "sampler_name": "euler"
@@ -503,19 +448,6 @@
     "class_type": "KSamplerSelect",
     "_meta": {
       "title": "KSamplerSelect"
-    }
-  },
-  "77:68": {
-    "inputs": {
-      "text": "",
-      "clip": [
-        "77:75",
-        0
-      ]
-    },
-    "class_type": "CLIPTextEncode",
-    "_meta": {
-      "title": "CLIP Text Encode (Positive Prompt)"
     }
   },
   "77:69": {
@@ -527,27 +459,6 @@
     "class_type": "Flux2Scheduler",
     "_meta": {
       "title": "Flux2Scheduler"
-    }
-  },
-  "77:70": {
-    "inputs": {
-      "cfg": 1,
-      "model": [
-        "77:76",
-        0
-      ],
-      "positive": [
-        "77:73:12:76",
-        0
-      ],
-      "negative": [
-        "77:73:12:77",
-        0
-      ]
-    },
-    "class_type": "CFGGuider",
-    "_meta": {
-      "title": "CFG Guider"
     }
   },
   "77:71": {
@@ -602,6 +513,32 @@
       "title": "Load LoRA"
     }
   },
+  "77:66": {
+    "inputs": {
+      "text": "",
+      "clip": [
+        "77:75",
+        0
+      ]
+    },
+    "class_type": "CLIPTextEncode",
+    "_meta": {
+      "title": "CLIP Text Encode (Negative Prompt)"
+    }
+  },
+  "77:68": {
+    "inputs": {
+      "text": "",
+      "clip": [
+        "77:75",
+        0
+      ]
+    },
+    "class_type": "CLIPTextEncode",
+    "_meta": {
+      "title": "CLIP Text Encode (Positive Prompt)"
+    }
+  },
   "77:73:12:78": {
     "inputs": {
       "pixels": [
@@ -648,6 +585,55 @@
     "class_type": "ReferenceLatent",
     "_meta": {
       "title": "ReferenceLatent"
+    }
+  },
+  "77:70": {
+    "inputs": {
+      "cfg": 1,
+      "model": [
+        "77:76",
+        0
+      ],
+      "positive": [
+        "77:73:12:76",
+        0
+      ],
+      "negative": [
+        "77:73:12:77",
+        0
+      ]
+    },
+    "class_type": "CFGGuider",
+    "_meta": {
+      "title": "CFG Guider"
+    }
+  },
+  "77:64": {
+    "inputs": {
+      "noise": [
+        "77:71",
+        0
+      ],
+      "guider": [
+        "77:70",
+        0
+      ],
+      "sampler": [
+        "77:67",
+        0
+      ],
+      "sigmas": [
+        "77:69",
+        0
+      ],
+      "latent_image": [
+        "77:63",
+        0
+      ]
+    },
+    "class_type": "SamplerCustomAdvanced",
+    "_meta": {
+      "title": "SamplerCustomAdvanced"
     }
   },
   "77:65": {
