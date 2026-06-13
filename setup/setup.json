@@ -28,7 +28,7 @@
 				{ "FileName": "%E7%A7%BB%E9%99%A4%E5%85%89%E5%BD%B1V2.safetensors", "Url": "https://huggingface.co/dx8152/Qwen-Image-Edit-2509-Light_restoration/resolve/main/%E7%A7%BB%E9%99%A4%E5%85%89%E5%BD%B1V2.safetensors?download=true",        "Size": 0.2 }
 			],
 			"UpscaleModels": [
-				{ "FileName": "4x-UltraSharpV2.pth", "Url": "https://huggingface.co/Kim2091/UltraSharpV2/resolve/main/4x-UltraSharpV2.pth?download=true", "Size": 0.1 }
+				{ "FileName": "4xLexicaDAT2_otf.pth", "Url": "https://huggingface.co/visualbruno/Upscalers/resolve/main/4xLexicaDAT2_otf.pth?download=true", "Size": 0.1 }
 			],			
 			"Workflows": [
 				{
@@ -191,7 +191,7 @@
 				{ "FileName": "Flux_2-Turbo-LoRA_comfyui.safetensors", "Url": "https://huggingface.co/Comfy-Org/flux2-dev/resolve/main/split_files/loras/Flux_2-Turbo-LoRA_comfyui.safetensors?download=true", "Size": 2.8 }
 			],
 			"UpscaleModels": [
-				{ "FileName": "4x-UltraSharpV2.pth", "Url": "https://huggingface.co/Kim2091/UltraSharpV2/resolve/main/4x-UltraSharpV2.pth?download=true", "Size": 0.1 }
+				{ "FileName": "4xLexicaDAT2_otf.pth", "Url": "https://huggingface.co/visualbruno/Upscalers/resolve/main/4xLexicaDAT2_otf.pth?download=true", "Size": 0.1 }
 			],			
 			"Workflows": [
 				{
@@ -288,7 +288,7 @@
 				{ "FileName": "flux2-klein9b-albedo-lora.safetensors", "Url": "https://huggingface.co/visualbruno/Flux2KleinLora/resolve/main/flux2-klein9b-albedo-lora.safetensors?download=true", "Size": 0.3 }
 			],
 			"UpscaleModels": [
-				{ "FileName": "4x-UltraSharpV2.pth", "Url": "https://huggingface.co/Kim2091/UltraSharpV2/resolve/main/4x-UltraSharpV2.pth?download=true", "Size": 0.1 }
+				{ "FileName": "4xLexicaDAT2_otf.pth", "Url": "https://huggingface.co/visualbruno/Upscalers/resolve/main/4xLexicaDAT2_otf.pth?download=true", "Size": 0.1 }
 			],
 			"Workflows": [
 				{

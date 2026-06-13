@@ -407,7 +407,7 @@
   },
   "78": {
     "inputs": {
-      "model_name": "4x-UltraSharpV2.pth"
+      "model_name": "4xLexicaDAT2_otf.pth"
     },
     "class_type": "UpscaleModelLoader",
     "_meta": {

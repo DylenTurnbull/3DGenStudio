@@ -1,7 +1,7 @@
 {
   "1": {
     "inputs": {
-      "image": "Image_312_00001_.png"
+      "image": ""
     },
     "class_type": "LoadImage",
     "_meta": {
@@ -10,7 +10,7 @@
   },
   "2": {
     "inputs": {
-      "model_name": "4x_foolhardy_Remacri.pth"
+      "model_name": "4xLexicaDAT2_otf.pth"
     },
     "class_type": "UpscaleModelLoader",
     "_meta": {

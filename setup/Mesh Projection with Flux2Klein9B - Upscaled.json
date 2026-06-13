@@ -65,8 +65,8 @@
   },
   "53": {
     "inputs": {
-      "low_threshold": 0.1,
-      "high_threshold": 0.3,
+      "low_threshold": 0.05,
+      "high_threshold": 0.25,
       "image": [
         "1",
         0
@@ -175,7 +175,7 @@
   },
   "69": {
     "inputs": {
-      "model_name": "4x-UltraSharpV2.pth"
+      "model_name": "4xLexicaDAT2_otf.pth"
     },
     "class_type": "UpscaleModelLoader",
     "_meta": {
