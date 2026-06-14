@@ -633,6 +633,10 @@ export function resolveProjectionLayersIntoImageData(outputData, layerSnapshots,
 
   const pixelCount = width * height
   const committed = new Uint8Array(pixelCount) // texels owned by already-processed layers
+  // Best per-texel confidence among the layers committed so far. Drives the seam
+  // cross-fade: a later view blends in proportional to how well IT sees the texel
+  // RELATIVE to the best committed view there (not an absolute threshold).
+  const committedConf = new Float32Array(pixelCount)
   // Base strength a later view blends into an owned seam texel at the very border;
   // ramps to 0 `blendPixels` inside. Scaled per layer by its "Opacity seams" knob.
   const SEAM_MAX = 0.7
@@ -714,27 +718,20 @@ export function resolveProjectionLayersIntoImageData(outputData, layerSnapshots,
         // touches UV-chart edges or coverage holes — only the view-ownership boundary.
         const dEdge = ownedDist[i] // pixels from the seam (0 at the seam, growing inward)
         const t = clamp01(1 - dEdge / Math.max(1, blendPx)) // 1 at the seam → 0 blendPx inside
-        const conf = layer.confidenceMap?.[i] || 0
-        // The stored confidence is a STEEP cosine (≈ facing^6 from the GPU bake): it
-        // collapses even moderate overlap angles to ~0 and only stays high in a narrow
-        // head-on cone. Gating the blend directly on it therefore kills ALL seam
-        // cross-fading (a later view's genuine moderate-angle overlap band scores ~0).
-        // Remap it back toward raw facing (pow ≈ 1/alpha) so the real overlap band — where
-        // both views see the surface acceptably — blends, while only the extreme-grazing
-        // silhouette band (near-zero facing → washed background colour) stays suppressed.
-        const blendConf = Math.pow(clamp01(conf), 0.2)
-        const smoothConf = blendConf * blendConf * (3 - 2 * blendConf)
+        // RELATIVE-confidence cross-fade: how well THIS view sees the texel versus the
+        // best view already committed here. This avoids every brittle absolute threshold:
+        //  • both views see it comparably (a normal view-to-view seam) → ~0.5 → smooth
+        //    50/50 cross-fade across the band (the arm seam now actually blends);
+        //  • the owner only has the dilation PAD here (conf ≈ 0.02) while this view sees it
+        //    for real → ratio ≈ 1 → this view takes over, so the pad never shows as a line
+        //    offset from the seam;
+        //  • this view only grazes its own silhouette here (washed/dark sample, low conf)
+        //    while the owner saw it well → ratio ≈ 0 → owner kept, no washed/dark bleed.
+        const thisConf = layer.confidenceMap?.[i] || 0
+        const ownerConf = committedConf[i] || 0
+        const relWeight = thisConf / (thisConf + ownerConf + 1e-4)
 
-        // Cross-fade this view into the owned region, CAPPED by how well THIS view sees
-        // the texel (smoothConf). Ramp from smoothConf*seamMax (blendPx inside the owned
-        // border) up to smoothConf at the boundary — so a view that sees the seam well
-        // hands over smoothly (≈opacity at the border, continuous with its own first-cover
-        // region just across the seam), while a view that sees it only grazingly barely
-        // contributes (no washed-out silhouette colour bleeding across the seam).
-        const finalSeamLimit = smoothConf * seamMax
-        const scaledConf = finalSeamLimit + (smoothConf - finalSeamLimit) * t
-
-        influence = (t * t * (3 - 2 * t)) * scaledConf * opacity
+        influence = (t * t * (3 - 2 * t)) * relWeight * (seamMax / SEAM_MAX) * opacity
       } else {
         // Owned and no blend requested → strict lock, do not change.
         influence = 0
@@ -761,10 +758,15 @@ export function resolveProjectionLayersIntoImageData(outputData, layerSnapshots,
       outputData[j + 3] = 255
     }
 
-    // Commit this layer's coverage so later layers treat it as owned.
+    // Commit this layer's coverage so later layers treat it as owned, and record the
+    // best confidence seen so far per texel (the reference the next layer's seam blend
+    // weighs itself against).
+    const layerConf = layer.confidenceMap
     for (let i = 0; i < pixelCount; i += 1) {
       if (layer.coverageMask[i]) {
         committed[i] = 1
+        const c = layerConf ? (layerConf[i] || 0) : 1
+        if (c > committedConf[i]) committedConf[i] = c
       }
     }
   }
