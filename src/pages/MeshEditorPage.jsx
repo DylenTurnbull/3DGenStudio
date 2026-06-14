@@ -4166,7 +4166,11 @@ export default function MeshEditorPage() {
             layerSnapshots.map(l => l.pixelData),
             layerSnapshots.map(l => l.coverageMask),
             texW,
-            texH
+            texH,
+            // Only let head-on co-visible texels inform the solve, so the grazing
+            // wrap-around "overlap" between opposite-facing views (whose colours
+            // genuinely differ) can no longer drive a whole-view tint.
+            { perViewConfidence: layerSnapshots.map(l => l.confidenceMap) }
           )
           // Gain compensation only equalises the views UP TO A GLOBAL SCALE — the
           // shared brightness target is pinned only by a weak prior, so adding a
@@ -4182,7 +4186,9 @@ export default function MeshEditorPage() {
                 continue
               }
               for (let k = 0; k < viewGains.length; k += 1) {
-                viewGains[k][ch] = Math.max(0.5, Math.min(2.0, viewGains[k][ch] / r))
+                // Tight clamp (matches solveViewGains): mild exposure correction only,
+                // never wide enough to flip a hue when re-expressed relative to layer 0.
+                viewGains[k][ch] = Math.max(0.82, Math.min(1.22, viewGains[k][ch] / r))
               }
             }
           }

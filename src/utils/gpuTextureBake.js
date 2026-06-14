@@ -836,7 +836,18 @@ function solveLinearSystem(A, b, k) {
 }
 
 export function solveViewGains(perViewColor, perViewCoverage, width, height, {
-  lambda = 0.4, minGain = 0.6, maxGain = 1.8
+  // Tight clamp: gain may correct mild exposure / white-balance differences between
+  // views, but must NEVER be wide enough to flip a hue. With minGain/maxGain at
+  // 0.82/1.22 the largest per-channel ratio is ~1.49, so a blue surface can never be
+  // dragged orange to "match" an opposite-facing view it does not truly share.
+  lambda = 0.6, minGain = 0.82, maxGain = 1.22,
+  // Per-view confidence maps (cosine weight, 0..1). When provided, an overlap texel
+  // only informs the solve if BOTH views see it confidently (>= minConfidence). Two
+  // opposite-facing views only "overlap" on grazing wrap-around surfaces, whose
+  // colours legitimately differ — feeding those into the photometric solve is what
+  // produced the runaway tint. Gating to head-on co-visible texels means a pair with
+  // no reliable shared surface contributes nothing and both views keep their colour.
+  perViewConfidence = null, minConfidence = 0.4
 } = {}) {
   const k = perViewColor.length
   const gains = Array.from({ length: k }, () => [1, 1, 1])
@@ -851,9 +862,11 @@ export function solveViewGains(perViewColor, perViewCoverage, width, height, {
       const j = p * 4
       for (let i = 0; i < k; i += 1) {
         if (!perViewCoverage[i][p]) continue
+        if (perViewConfidence && (perViewConfidence[i]?.[p] ?? 0) < minConfidence) continue
         const ci = perViewColor[i][j + ch] / 255
         for (let q = i + 1; q < k; q += 1) {
           if (!perViewCoverage[q][p]) continue
+          if (perViewConfidence && (perViewConfidence[q]?.[p] ?? 0) < minConfidence) continue
           const cq = perViewColor[q][j + ch] / 255
           sum[i][q] += ci; sum[q][i] += cq
           cnt[i][q] += 1; cnt[q][i] += 1
@@ -1310,6 +1323,7 @@ export async function bakeMultiViewTextureGPU(params) {
     if (gainCompensation && views.length > 1) {
       const perColor = []
       const perCov = []
+      const perConf = []
       for (let i = 0; i < views.length; i += 1) {
         views[i].camera.updateMatrixWorld?.(true); views[i].camera.updateProjectionMatrix?.()
         const cam = fittedProjector(views[i].camera, sceneSphere)
@@ -1321,10 +1335,12 @@ export async function bakeMultiViewTextureGPU(params) {
         statsInto(renderer, stats, temp.texture)
         const buf = new Uint8Array(textureWidth * textureHeight * 4)
         renderer.readRenderTargetPixels(resolved, 0, 0, textureWidth, textureHeight, buf)
-        const { coverageMask } = readStats(renderer, stats, textureWidth, textureHeight)
-        perColor.push(buf); perCov.push(coverageMask)
+        const { coverageMask, confidenceMap } = readStats(renderer, stats, textureWidth, textureHeight)
+        perColor.push(buf); perCov.push(coverageMask); perConf.push(confidenceMap)
       }
-      gains = solveViewGains(perColor, perCov, textureWidth, textureHeight)
+      // Gate the photometric solve to head-on co-visible texels so grazing overlap
+      // between opposite-facing views cannot drive a runaway whole-view tint.
+      gains = solveViewGains(perColor, perCov, textureWidth, textureHeight, { perViewConfidence: perConf })
     }
 
     // Main accumulation pass.
