@@ -263,6 +263,34 @@ function computeProjectionMaskWorldRadius(intersection, camera, canvasHeight, br
   return Math.max(1e-4, (brushSizePx / 2) * worldPerPixel)
 }
 
+// Diagonal white/grey hatch used for the live mask-draw preview (instead of a flat
+// white fill). Built once: a small tile of a white band over a grey band that, once
+// the pattern is rotated 45°, repeats into diagonal stripes.
+let maskStripeTile = null
+function getMaskStripeTile() {
+  if (maskStripeTile) {
+    return maskStripeTile
+  }
+  const period = 10
+  const tile = document.createElement('canvas')
+  tile.width = period
+  tile.height = period
+  const ctx = tile.getContext('2d')
+  ctx.fillStyle = '#686868'
+  ctx.fillRect(0, 0, period, period)
+  ctx.fillStyle = '#333333'
+  ctx.fillRect(0, 0, period, period / 2)
+  maskStripeTile = tile
+  return tile
+}
+function createMaskStripePattern(ctx) {
+  const pattern = ctx.createPattern(getMaskStripeTile(), 'repeat')
+  if (pattern?.setTransform && typeof DOMMatrix !== 'undefined') {
+    pattern.setTransform(new DOMMatrix().rotate(45))
+  }
+  return pattern
+}
+
 export default function MeshEditorPage() {
   const navigate = useNavigate()
   const [searchParams] = useSearchParams()
@@ -414,6 +442,8 @@ export default function MeshEditorPage() {
   // overlay on TOP of this snapshot (no expensive compose), then restore + apply
   // the real composite once on release.
   const maskPreviewBaseRef = useRef(null)
+  // Reusable offscreen canvas holding the striped hatch clipped to the painted mask.
+  const maskPreviewVeilRef = useRef(null)
   // True while a released mask stroke (or a Clear) is being applied: shows an
   // animated "applying" veil and blocks starting another stroke / clearing until
   // the compose finishes.
@@ -2598,15 +2628,43 @@ export default function MeshEditorPage() {
     if (!textureCanvas || !base || !maskCanvas || !displayTextureRef.current) {
       return
     }
+    const w = textureCanvas.width
+    const h = textureCanvas.height
+
+    // Build the veil: a diagonal white/grey hatch kept ONLY where the mask is painted
+    // (fill the hatch over everything, then 'destination-in' the mask alpha).
+    let veil = maskPreviewVeilRef.current
+    if (!veil) {
+      veil = document.createElement('canvas')
+      maskPreviewVeilRef.current = veil
+    }
+    if (veil.width !== w || veil.height !== h) {
+      veil.width = w
+      veil.height = h
+    }
+    const vctx = veil.getContext('2d')
+    vctx.globalCompositeOperation = 'source-over'
+    vctx.globalAlpha = 1
+    vctx.clearRect(0, 0, w, h)
+    const stripePattern = createMaskStripePattern(vctx)
+    if (stripePattern) {
+      vctx.fillStyle = stripePattern
+    } else {
+      vctx.fillStyle = '#ffffff'
+    }
+    vctx.fillRect(0, 0, w, h)
+    vctx.globalCompositeOperation = 'destination-in'
+    vctx.drawImage(maskCanvas, 0, 0)
+    vctx.globalCompositeOperation = 'source-over'
+
     const ctx = textureCanvas.getContext('2d')
     ctx.globalCompositeOperation = 'source-over'
     ctx.globalAlpha = 1
-    ctx.clearRect(0, 0, textureCanvas.width, textureCanvas.height)
+    ctx.clearRect(0, 0, w, h)
     ctx.drawImage(base, 0, 0)
-    // The mask canvas is white-on-transparent, so a reduced-alpha draw reads as a
-    // translucent white veil exactly where the user has painted.
-    ctx.globalAlpha = 0.55
-    ctx.drawImage(maskCanvas, 0, 0)
+    // Slightly translucent so the underlying surface stays readable through the hatch.
+    ctx.globalAlpha = 0.5
+    ctx.drawImage(veil, 0, 0)
     ctx.globalAlpha = 1
     updateCanvasTexture(displayTextureRef.current)
   }, [texturableMesh])
