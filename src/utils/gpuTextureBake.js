@@ -90,7 +90,25 @@ let sharedQuadScene = null
 let sharedQuadCamera = null
 let sharedQuadMesh = null
 
+// A persistent offscreen WebGLRenderer can silently lose its GPU context
+// (driver reset, tab backgrounding, or the browser evicting the oldest WebGL
+// context once too many exist — e.g. after a ComfyUI crash followed by retries).
+// Three.js does NOT auto-recreate it, so a dead renderer bakes NOTHING onto the
+// texture until a full page reload. Treat a lost context as "needs rebuild".
+function isBakeContextLost(renderer) {
+  if (!renderer) return false
+  try {
+    return renderer.getContext().isContextLost()
+  } catch {
+    return true
+  }
+}
+
 function getBakeRenderer() {
+  if (isBakeContextLost(sharedRenderer)) {
+    sharedRenderer.dispose?.()
+    sharedRenderer = null
+  }
   if (!sharedRenderer) {
     sharedRenderer = new THREE.WebGLRenderer({
       antialias: false,

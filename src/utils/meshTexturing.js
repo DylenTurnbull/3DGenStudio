@@ -31,7 +31,26 @@ let sharedDepthPrepassPixels = null
 let sharedProjectionRenderer = null
 let sharedMaskProjectionRenderer = null
 
+// A persistent offscreen WebGLRenderer can silently lose its GPU context
+// (driver reset, tab backgrounding, or the browser evicting the oldest WebGL
+// context once too many exist — e.g. after a ComfyUI crash followed by retries).
+// Three.js does NOT auto-recreate it, so a dead renderer keeps producing BLANK
+// frames: the projection capture turns black and the GPU bake writes nothing,
+// until a full page reload. Treat a lost context as "needs rebuild".
+function isRendererContextLost(renderer) {
+  if (!renderer) return false
+  try {
+    return renderer.getContext().isContextLost()
+  } catch {
+    return true
+  }
+}
+
 function getSharedProjectionRenderer() {
+  if (isRendererContextLost(sharedProjectionRenderer)) {
+    sharedProjectionRenderer.dispose?.()
+    sharedProjectionRenderer = null
+  }
   if (!sharedProjectionRenderer) {
     sharedProjectionRenderer = new THREE.WebGLRenderer({
       antialias: true,
@@ -45,6 +64,10 @@ function getSharedProjectionRenderer() {
 }
 
 function getSharedMaskProjectionRenderer() {
+  if (isRendererContextLost(sharedMaskProjectionRenderer)) {
+    sharedMaskProjectionRenderer.dispose?.()
+    sharedMaskProjectionRenderer = null
+  }
   if (!sharedMaskProjectionRenderer) {
     sharedMaskProjectionRenderer = new THREE.WebGLRenderer({
       antialias: false,
@@ -60,6 +83,15 @@ function getSharedMaskProjectionRenderer() {
 function getDepthPrepassResources(width, height) {
   const safeWidth = Math.max(1, Math.round(width || 1))
   const safeHeight = Math.max(1, Math.round(height || 1))
+
+  if (isRendererContextLost(sharedDepthPrepassRenderer)) {
+    sharedDepthPrepassRenderer.dispose?.()
+    sharedDepthPrepassRenderer = null
+    // The render target's framebuffer belongs to the dead context — drop it so
+    // it is rebuilt against the fresh renderer below.
+    sharedDepthPrepassTarget?.dispose?.()
+    sharedDepthPrepassTarget = null
+  }
 
   if (!sharedDepthPrepassRenderer) {
     sharedDepthPrepassRenderer = new THREE.WebGLRenderer({

@@ -527,7 +527,7 @@ export default function KanbanImageCard({
                           disabled={availableActionWorkflows.length === 0}
                         >
                           {availableActionWorkflows.length === 0 && <option value="">No workflows available</option>}
-                          {availableActionWorkflows.map(workflow => (
+                          {[...availableActionWorkflows].sort((a, b) => (a.name || '').localeCompare(b.name || '')).map(workflow => (
                             <option key={workflow.id} value={workflow.id}>{workflow.name}</option>
                           ))}
                         </select>

@@ -88,7 +88,7 @@ export default function TexturingToolsPanel({
           {texturingWorkflows.length === 0 ? (
             <option value="">No 2-image ComfyUI workflow found</option>
           ) : (
-            texturingWorkflows.map(workflow => (
+            [...texturingWorkflows].sort((a, b) => (a.name || '').localeCompare(b.name || '')).map(workflow => (
               <option key={workflow.id} value={workflow.id}>{workflow.name}</option>
             ))
           )}

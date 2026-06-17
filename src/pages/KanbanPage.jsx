@@ -2790,7 +2790,7 @@ export default function KanbanPage() {
                         value={imageDraft.workflowId}
                         onChange={e => handleComfyWorkflowChange(e.target.value)}
                       >
-                        {imageGenerationWorkflows.map(workflow => (
+                        {[...imageGenerationWorkflows].sort((a, b) => (a.name || '').localeCompare(b.name || '')).map(workflow => (
                           <option key={workflow.id} value={workflow.id}>{workflow.name}</option>
                         ))}
                       </select>
@@ -3023,7 +3023,7 @@ export default function KanbanPage() {
                         value={meshDraft.workflowId}
                         onChange={e => handleMeshComfyWorkflowChange(e.target.value)}
                       >
-                        {meshGenWorkflows.map(workflow => (
+                        {[...meshGenWorkflows].sort((a, b) => (a.name || '').localeCompare(b.name || '')).map(workflow => (
                           <option key={workflow.id} value={workflow.id}>{workflow.name}</option>
                         ))}
                       </select>

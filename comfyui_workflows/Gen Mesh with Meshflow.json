@@ -1,0 +1,82 @@
+{
+  "1": {
+    "inputs": {
+      "mesh_path": "",
+      "normalize": true,
+      "preprocess": true
+    },
+    "class_type": "MeshflowLoadMesh",
+    "_meta": {
+      "title": "Meshflow - LoadMesh"
+    }
+  },
+  "2": {
+    "inputs": {
+      "steps": 28,
+      "seed": 12345,
+      "guidance_scale": 2.5,
+      "pipeline": [
+        "5",
+        0
+      ],
+      "mesh": [
+        "1",
+        0
+      ],
+      "image": [
+        "3",
+        0
+      ]
+    },
+    "class_type": "MeshflowMeshProcessor",
+    "_meta": {
+      "title": "Meshflow - MeshProcessor"
+    }
+  },
+  "3": {
+    "inputs": {
+      "image": ""
+    },
+    "class_type": "LoadImage",
+    "_meta": {
+      "title": "Load Image"
+    }
+  },
+  "4": {
+    "inputs": {
+      "filename_prefix": "Meshflow",
+      "file_format": "glb",
+      "trimesh": [
+        "2",
+        0
+      ]
+    },
+    "class_type": "MeshflowExportMesh",
+    "_meta": {
+      "title": "Meshflow - ExportMesh"
+    }
+  },
+  "5": {
+    "inputs": {
+      "num_vertices": 4096,
+      "dinov3_model": "dinov3_vitl16_pretrain_lvd1689m-8aa4cbdd.pth"
+    },
+    "class_type": "MeshflowLoadModel",
+    "_meta": {
+      "title": "Meshflow - LoadModel"
+    }
+  },
+  "6": {
+    "inputs": {
+      "model_file": [
+        "4",
+        0
+      ],
+      "image": ""
+    },
+    "class_type": "Preview3D",
+    "_meta": {
+      "title": "Preview 3D & Animation"
+    }
+  }
+}

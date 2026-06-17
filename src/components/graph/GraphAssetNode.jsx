@@ -36,6 +36,7 @@ import {
   resolveSelectedInputSource
 } from '../../utils/graphHelpers'
 import ComfyTextButton from '../comfy/ComfyTextButton'
+import LastActionInfo from './LastActionInfo'
 
 // Image / mesh asset node. Handles preview (incl. 3D mesh viewer), generation
 // and edit action panels (local / assets / API / ComfyUI), and async mesh polling.
@@ -389,6 +390,9 @@ const GraphAssetNode = memo(function GraphAssetNode({ data }) {
               }}
             />
             <div className="image-card__badges">
+              {data.metadata?.lastActionParams && (
+                <LastActionInfo lastActionParams={data.metadata.lastActionParams} />
+              )}
               <span
                 className="image-card__source"
                 style={{
@@ -576,7 +580,7 @@ const GraphAssetNode = memo(function GraphAssetNode({ data }) {
                         value={draft.workflowId || ''}
                         onChange={event => data.onDraftFieldChange?.(data.id, 'workflowId', event.target.value)}
                       >
-                        {data.imageGenerationWorkflows.map(workflow => (
+                        {[...data.imageGenerationWorkflows].sort((a, b) => (a.name || '').localeCompare(b.name || '')).map(workflow => (
                           <option key={workflow.id} value={workflow.id}>{workflow.name}</option>
                         ))}
                       </select>
@@ -953,7 +957,7 @@ const GraphAssetNode = memo(function GraphAssetNode({ data }) {
                         value={draft.workflowId || ''}
                         onChange={event => data.onDraftFieldChange?.(data.id, 'workflowId', event.target.value)}
                       >
-                        {data.meshGenerationWorkflows.map(workflow => (
+                        {[...data.meshGenerationWorkflows].sort((a, b) => (a.name || '').localeCompare(b.name || '')).map(workflow => (
                           <option key={workflow.id} value={workflow.id}>{workflow.name}</option>
                         ))}
                       </select>
@@ -1097,7 +1101,7 @@ const GraphAssetNode = memo(function GraphAssetNode({ data }) {
                         value={draft.workflowId || ''}
                         onChange={event => data.onDraftFieldChange?.(data.id, 'workflowId', event.target.value)}
                       >
-                        {data.imageEditWorkflows.map(workflow => (
+                        {[...data.imageEditWorkflows].sort((a, b) => (a.name || '').localeCompare(b.name || '')).map(workflow => (
                           <option key={workflow.id} value={workflow.id}>{workflow.name}</option>
                         ))}
                       </select>

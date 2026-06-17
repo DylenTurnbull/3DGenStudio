@@ -2885,8 +2885,32 @@ export async function deleteAssetById(assetId) {
     return { status: 'unlinked' };
   }
 
+  const deletedRows = await all(
+    db,
+    'SELECT filePath, thumbnail FROM Assets WHERE id = ? OR parentId = ?',
+    [assetId, assetId]
+  );
+
   await run(db, 'DELETE FROM Assets WHERE parentId = ?', [assetId]);
   await run(db, 'DELETE FROM Assets WHERE id = ?', [assetId]);
+
+  const filePathsToCheck = new Set(deletedRows.map(row => row.filePath).filter(Boolean));
+  const thumbnailsToCheck = new Set(deletedRows.map(row => row.thumbnail).filter(Boolean));
+
+  for (const filePath of filePathsToCheck) {
+    const stillReferenced = await get(db, 'SELECT 1 FROM Assets WHERE filePath = ? LIMIT 1', [filePath]);
+    if (!stillReferenced) {
+      await fs.rm(toAbsoluteStoragePath(filePath), { force: true }).catch(() => null);
+    }
+  }
+
+  for (const thumbnail of thumbnailsToCheck) {
+    const stillReferenced = await get(db, 'SELECT 1 FROM Assets WHERE thumbnail = ? LIMIT 1', [thumbnail]);
+    if (!stillReferenced) {
+      await fs.rm(toAbsoluteStoragePath(thumbnail), { force: true }).catch(() => null);
+    }
+  }
+
   return { status: 'deleted' };
 }
 

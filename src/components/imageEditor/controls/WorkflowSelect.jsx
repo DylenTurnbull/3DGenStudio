@@ -11,7 +11,7 @@ export default function WorkflowSelect({ workflows, selectedWorkflowId, onChange
       >
         {workflows.length === 0 ? (
           <option value="">No compatible workflows</option>
-        ) : workflows.map(workflow => (
+        ) : [...workflows].sort((a, b) => (a.name || '').localeCompare(b.name || '')).map(workflow => (
           <option key={workflow.id} value={workflow.id}>{workflow.name}</option>
         ))}
       </select>

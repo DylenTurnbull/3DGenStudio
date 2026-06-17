@@ -573,6 +573,63 @@ export function resolveWorkflowParameterValue(parameter, draft, inputSources = [
   return draft?.inputs?.[parameter.id]
 }
 
+// --- Last action parameter snapshots -------------------------------------
+// A "last action" snapshot is a display-ready record of the parameters that
+// produced a node's current result. It is serialized into node.metadata so the
+// (i) popover can show it later without re-resolving anything. Only ComfyUI and
+// external API actions are recorded.
+
+export function formatLastActionValue(value) {
+  if (value === null || value === undefined || value === '') return '—'
+  if (typeof value === 'boolean') return value ? 'true' : 'false'
+  if (typeof value === 'object') {
+    if (value.source) return String(value.source)
+    return JSON.stringify(value)
+  }
+  return String(value)
+}
+
+// Build the labeled-value list for a ComfyUI workflow run from the resolved
+// inputValues, mapping each value back to its parameter definition and noting
+// when a value came from a connected node (boundFrom).
+export function describeWorkflowParams(workflow, inputValues = {}, draft = null, inputSources = []) {
+  return (workflow?.parameters || []).map(parameter => {
+    const valueType = getWorkflowParameterValueType(parameter)
+    const binding = getWorkflowParameterBinding(draft, parameter)
+    let boundFrom = null
+    if (binding.source && binding.source !== 'custom') {
+      boundFrom = resolveSelectedInputSource(binding.source, inputSources)?.label || null
+    }
+
+    return {
+      label: parameter.name || parameter.label || String(parameter.id),
+      type: valueType,
+      value: inputValues?.[parameter.id],
+      boundFrom
+    }
+  })
+}
+
+// Wrap a params list into the stored snapshot shape. `params` is an array of
+// { label, type, value, boundFrom } entries (e.g. from describeWorkflowParams
+// or built inline for external API actions). Raw values are formatted here so
+// callers can pass booleans/numbers/objects directly.
+export function buildLastActionParams({ source, label = null, params = [], ranAt = null }) {
+  return {
+    source,
+    label: label || null,
+    ranAt: ranAt || new Date().toISOString(),
+    params: (params || [])
+      .filter(param => param && param.label)
+      .map(param => ({
+        label: param.label,
+        type: param.type || 'string',
+        value: formatLastActionValue(param.value),
+        boundFrom: param.boundFrom || null
+      }))
+  }
+}
+
 export function resolveImageSourceOption(sourceSelection, inputSources = [], libraryOptions = []) {
   const connectorSource = resolveSelectedInputSource(sourceSelection, inputSources)
   if (connectorSource) {

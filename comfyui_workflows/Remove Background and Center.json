@@ -1,0 +1,60 @@
+{
+  "59": {
+    "inputs": {
+      "filename_prefix": "3DGenStudioNoBG",
+      "images": [
+        "72",
+        0
+      ]
+    },
+    "class_type": "SaveImage",
+    "_meta": {
+      "title": "Save Image"
+    }
+  },
+  "60": {
+    "inputs": {
+      "model": "RMBG-2.0",
+      "sensitivity": 1,
+      "process_res": 1024,
+      "mask_blur": 0,
+      "mask_offset": 0,
+      "invert_output": false,
+      "refine_foreground": false,
+      "background": "Alpha",
+      "background_color": "#000000",
+      "image": [
+        "71",
+        0
+      ]
+    },
+    "class_type": "RMBG",
+    "_meta": {
+      "title": "Remove Background (RMBG)"
+    }
+  },
+  "71": {
+    "inputs": {
+      "image": "Qwen_00004_.png"
+    },
+    "class_type": "Trellis2LoadImageWithTransparency",
+    "_meta": {
+      "title": "Trellis2 - Load Image with Transparency"
+    }
+  },
+  "72": {
+    "inputs": {
+      "padding": 0,
+      "remove_background": true,
+      "max_size": 1024,
+      "image": [
+        "60",
+        0
+      ]
+    },
+    "class_type": "Trellis2PreProcessImage",
+    "_meta": {
+      "title": "Trellis2 - PreProcess Image"
+    }
+  }
+}

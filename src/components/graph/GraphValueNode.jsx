@@ -15,6 +15,7 @@ import {
   resolveSelectedInputSource
 } from '../../utils/graphHelpers'
 import ComfyTextButton from '../comfy/ComfyTextButton'
+import LastActionInfo from './LastActionInfo'
 
 // Value node for Number / Text / Boolean outputs. Text nodes also accept inputs
 // and can run text-generating ComfyUI workflows.
@@ -188,6 +189,9 @@ const GraphValueNode = memo(function GraphValueNode({ data }) {
             >
               {outputMeta.label}
             </span>
+            {data.metadata?.lastActionParams && (
+              <LastActionInfo lastActionParams={data.metadata.lastActionParams} />
+            )}
           </div>
 
           <button
@@ -302,7 +306,7 @@ const GraphValueNode = memo(function GraphValueNode({ data }) {
                           value={draft.workflowId || ''}
                           onChange={event => data.onDraftFieldChange?.(data.id, 'workflowId', event.target.value)}
                         >
-                          {textWorkflows.map(workflow => (
+                          {[...textWorkflows].sort((a, b) => (a.name || '').localeCompare(b.name || '')).map(workflow => (
                             <option key={workflow.id} value={workflow.id}>{workflow.name}</option>
                           ))}
                         </select>
