@@ -47,6 +47,7 @@ import {
   TRIPO_TEXTURE_ALIGNMENT_OPTIONS,
   TRIPO_TEXTURE_QUALITY_OPTIONS,
   buildInputConnectors,
+  buildLastActionParams,
   buildNodeInputSources,
   canFetchTencentMeshResult,
   canFetchTripoMeshResult,
@@ -54,6 +55,7 @@ import {
   createComfyExecutionId,
   createWorkflowDraftBindings,
   createWorkflowDraftInputs,
+  describeWorkflowParams,
   filterImageEditWorkflows,
   filterImageGenerationWorkflows,
   filterMeshGenerationWorkflows,
@@ -1287,7 +1289,16 @@ export default function GraphPage({ project }) {
             const updatedNode = await updateProjectNode(project.id, Number(targetNodeId), {
               status: null,
               progress: null,
-              metadata: { outputValue: textResult.text, lastAction: 'comfy-text', promptId }
+              metadata: {
+                outputValue: textResult.text,
+                lastAction: 'comfy-text',
+                promptId,
+                lastActionParams: buildLastActionParams({
+                  source: 'ComfyUI',
+                  label: workflow.name,
+                  params: describeWorkflowParams(workflow, inputValues, targetDraft, targetInputSources)
+                })
+              }
             })
             replaceFlowNodeData(updatedNode)
             setNodeTransientData(targetNodeId, {
@@ -1317,7 +1328,16 @@ export default function GraphPage({ project }) {
                 prompt: targetDraft.prompt.trim(),
                 name: targetDraft.name.trim()
               })
-              await applyNodeResult(generatedAsset, { lastAction: 'image-api' })
+              await applyNodeResult(generatedAsset, {
+                lastAction: 'image-api',
+                lastActionParams: buildLastActionParams({
+                  source: 'API',
+                  label: imageGenerationApis.find(api => api.id === targetDraft.selectedApi)?.name || targetDraft.selectedApi,
+                  params: [
+                    { label: 'Prompt', type: 'string', value: targetDraft.prompt.trim() }
+                  ]
+                })
+              })
               setActionDraftsByNodeId({})
             } catch (err) {
               await setProcessingState('error', null, { error: err.message || 'Image generation failed' })
@@ -1415,7 +1435,15 @@ export default function GraphPage({ project }) {
                 progressDetail: 'Saving generated image',
                 currentNodeLabel: 'ComfyUI workflow completed'
               })
-              await applyNodeResult(imageAssets[0], { lastAction: 'comfy-workflow', promptId })
+              await applyNodeResult(imageAssets[0], {
+                lastAction: 'comfy-workflow',
+                promptId,
+                lastActionParams: buildLastActionParams({
+                  source: 'ComfyUI',
+                  label: workflow.name,
+                  params: describeWorkflowParams(workflow, inputValues, targetDraft, targetInputSources)
+                })
+              })
               if (imageAssets.length > 1) {
                 await spawnAdditionalResultNodes('Image', imageAssets.slice(1))
               }
@@ -1454,7 +1482,15 @@ export default function GraphPage({ project }) {
               }
               await applyNodeResult({ id: savedEdits[0].id, name: savedEdits[0].name || targetDraft.name.trim() }, {
                 lastAction: 'image-edit-api',
-                inputSource: sourceReference
+                inputSource: sourceReference,
+                lastActionParams: buildLastActionParams({
+                  source: 'API',
+                  label: imageEditApis.find(api => api.id === targetDraft.selectedApi)?.name || targetDraft.selectedApi,
+                  params: [
+                    { label: 'Prompt', type: 'string', value: targetDraft.prompt.trim() },
+                    { label: 'Image source', type: 'image', value: sourceReference, boundFrom: selectedApiSource?.label || null }
+                  ]
+                })
               })
               if (savedEdits.length > 1) {
                 await spawnAdditionalResultNodes('Image', savedEdits.slice(1).map(edit => ({
@@ -1563,7 +1599,12 @@ export default function GraphPage({ project }) {
               await applyNodeResult({ id: savedEdits[0].id, name: savedEdits[0].name || targetDraft.name.trim() }, {
                 lastAction: 'image-edit-comfy',
                 promptId,
-                inputSource: JSON.stringify(inputValues)
+                inputSource: JSON.stringify(inputValues),
+                lastActionParams: buildLastActionParams({
+                  source: 'ComfyUI',
+                  label: workflow.name,
+                  params: describeWorkflowParams(workflow, inputValues, targetDraft, targetInputSources)
+                })
               })
               if (savedEdits.length > 1) {
                 await spawnAdditionalResultNodes('Image', savedEdits.slice(1).map(edit => ({
@@ -1676,7 +1717,21 @@ export default function GraphPage({ project }) {
                   promptId: response.jobId,
                   jobStatus: 'WAIT',
                   detail: 'Tencent Cloud job submitted. Use GET RESULT to refresh status.',
-                  currentNodeLabel: 'Tencent Cloud job is queued'
+                  currentNodeLabel: 'Tencent Cloud job is queued',
+                  lastActionParams: buildLastActionParams({
+                    source: 'API',
+                    label: meshGenerationApis.find(api => api.id === targetDraft.selectedApi)?.name || 'Tencent Cloud',
+                    params: [
+                      { label: 'Prompt', type: 'string', value: trimmedPrompt },
+                      { label: 'Image source', type: 'image', value: effectiveSourceReference || '' },
+                      { label: 'Region', type: 'string', value: response.region || targetDraft.region },
+                      { label: 'Model version', type: 'string', value: targetDraft.modelVersion },
+                      { label: 'Generation type', type: 'string', value: targetDraft.generationType },
+                      { label: 'Polygon type', type: 'string', value: targetDraft.generationType === 'LowPoly' ? targetDraft.polygonType : '' },
+                      { label: 'Enable PBR', type: 'boolean', value: Boolean(targetDraft.enablePBR) },
+                      { label: 'Face count', type: 'number', value: Number(targetDraft.faceCount) || 500000 }
+                    ]
+                  })
                 }, {
                   progressDetail: 'Tencent Cloud job submitted. Use GET RESULT to refresh status.',
                   currentNodeLabel: 'Tencent Cloud job is queued'
@@ -1804,7 +1859,24 @@ export default function GraphPage({ project }) {
                   promptId: response.taskId,
                   taskStatus: 'queued',
                   detail: 'Tripo AI task submitted. Use GET RESULT to refresh status.',
-                  currentNodeLabel: 'Tripo AI task is queued'
+                  currentNodeLabel: 'Tripo AI task is queued',
+                  lastActionParams: buildLastActionParams({
+                    source: 'API',
+                    label: meshGenerationApis.find(api => api.id === targetDraft.selectedApi)?.name || 'Tripo AI',
+                    params: [
+                      { label: 'Prompt', type: 'string', value: trimmedPrompt },
+                      { label: 'Image source', type: 'image', value: effectiveSourceReference || '' },
+                      { label: 'Model version', type: 'string', value: targetDraft.modelVersion || 'v2.5-20250123' },
+                      { label: 'Model seed', type: 'string', value: targetDraft.modelSeed },
+                      { label: 'Face limit', type: 'string', value: targetDraft.faceLimit },
+                      { label: 'Texture', type: 'boolean', value: Boolean(targetDraft.texture) },
+                      { label: 'PBR', type: 'boolean', value: Boolean(targetDraft.pbr) },
+                      { label: 'Texture quality', type: 'string', value: targetDraft.textureQuality || 'standard' },
+                      { label: 'Auto size', type: 'boolean', value: Boolean(targetDraft.autoSize) },
+                      { label: 'Export UV', type: 'boolean', value: Boolean(targetDraft.exportUv) },
+                      { label: 'Geometry quality', type: 'string', value: targetDraft.geometryQuality || 'standard' }
+                    ]
+                  })
                 }, {
                   progressDetail: 'Tripo AI task submitted. Use GET RESULT to refresh status.',
                   currentNodeLabel: 'Tripo AI task is queued'
@@ -1848,7 +1920,15 @@ export default function GraphPage({ project }) {
               await ensureGeneratedMeshThumbnails(savedMeshes)
               await applyNodeResult(savedMeshes[0], {
                 lastAction: 'mesh-generation-api',
-                inputSource: sourceReference
+                inputSource: sourceReference,
+                lastActionParams: buildLastActionParams({
+                  source: 'API',
+                  label: meshGenerationApis.find(api => api.id === targetDraft.selectedApi)?.name || targetDraft.selectedApi,
+                  params: [
+                    { label: 'Prompt', type: 'string', value: targetDraft.prompt.trim() },
+                    { label: 'Image source', type: 'image', value: sourceReference, boundFrom: selectedApiSource?.label || null }
+                  ]
+                })
               })
               if (savedMeshes.length > 1) {
                 await spawnAdditionalResultNodes('Mesh Gen', savedMeshes.slice(1))
@@ -1951,7 +2031,15 @@ export default function GraphPage({ project }) {
                 progressDetail: 'Saving generated mesh',
                 currentNodeLabel: 'ComfyUI mesh generation completed'
               })
-              await applyNodeResult(meshAssets[0], { lastAction: 'mesh-generation-comfy', promptId })
+              await applyNodeResult(meshAssets[0], {
+                lastAction: 'mesh-generation-comfy',
+                promptId,
+                lastActionParams: buildLastActionParams({
+                  source: 'ComfyUI',
+                  label: workflow.name,
+                  params: describeWorkflowParams(workflow, inputValues, targetDraft, targetInputSources)
+                })
+              })
               if (meshAssets.length > 1) {
                 await spawnAdditionalResultNodes('Mesh Gen', meshAssets.slice(1))
               }

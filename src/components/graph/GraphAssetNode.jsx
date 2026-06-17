@@ -36,6 +36,7 @@ import {
   resolveSelectedInputSource
 } from '../../utils/graphHelpers'
 import ComfyTextButton from '../comfy/ComfyTextButton'
+import LastActionInfo from './LastActionInfo'
 
 // Image / mesh asset node. Handles preview (incl. 3D mesh viewer), generation
 // and edit action panels (local / assets / API / ComfyUI), and async mesh polling.
@@ -389,6 +390,9 @@ const GraphAssetNode = memo(function GraphAssetNode({ data }) {
               }}
             />
             <div className="image-card__badges">
+              {data.metadata?.lastActionParams && (
+                <LastActionInfo lastActionParams={data.metadata.lastActionParams} />
+              )}
               <span
                 className="image-card__source"
                 style={{
