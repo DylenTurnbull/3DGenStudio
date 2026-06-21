@@ -584,6 +584,13 @@
   white-space: nowrap;
 }
 
+.post-proc-panel__hint {
+  margin: 0 0 0.1rem;
+  font-size: 0.72rem;
+  line-height: 1.35;
+  color: var(--on-surface-variant, #999);
+}
+
 .post-proc-panel__actions {
   display: flex;
   gap: 0.5rem;

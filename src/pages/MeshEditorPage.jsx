@@ -4656,9 +4656,19 @@ export default function MeshEditorPage() {
         )
       }
       if (postProcSeamEnabled) {
-        setFeedback('Smoothing seams...')
-        setProjectionRebuildProgress(postProcFillHolesEnabled ? 0.9 : 0)
-        await applySeamPostProcessing(textureCanvas, snapshots, postProcSeamThreshold, postProcBlurRadius, postProcStrength)
+        setFeedback('Smoothing silhouette seams...')
+        const seamBase = postProcFillHolesEnabled ? 0.9 : 0
+        const seamShare = 1 - seamBase
+        setProjectionRebuildProgress(seamBase)
+        await applySeamPostProcessing(
+          textureCanvas,
+          snapshots,
+          postProcSeamThreshold,
+          postProcBlurRadius,
+          postProcStrength,
+          texturableMesh,
+          p => setProjectionRebuildProgress(seamBase + p * seamShare)
+        )
       }
 
       setProjectionRebuildProgress(1)
@@ -6371,6 +6381,11 @@ export default function MeshEditorPage() {
                     </label>
                     {postProcSeamEnabled && (
                       <>
+                        <p className="post-proc-panel__hint">
+                          Blends the colour step where two views meet on the 3D surface
+                          (silhouette seams). Works in world space, so it never smears
+                          across UV-atlas seams.
+                        </p>
                         <div className="post-proc-panel__row">
                           <label>Seam width</label>
                           <input

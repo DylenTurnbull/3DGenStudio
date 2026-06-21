@@ -785,25 +785,32 @@ export function resolveProjectionLayersIntoImageData(outputData, layerSnapshots,
   dilateProjectionGutter(outputData, committed, width, height, undefined, uvOccupancyMask)
 }
 
-// Seam smoothing post-process.
+// Seam smoothing post-process — SILHOUETTE seams, not UV seams.
 //
-// The visible seams in a projection bake are the ownership BOUNDARIES between
-// two different views — where the front view meets the top view in the
-// composite, etc. Both sides of such a boundary are fully-covered, high
-// -confidence texels, so the old detector (smooth only where the per-texel max
-// confidence < threshold) found almost nothing once the bake moved to the GPU:
-// the GPU path uses a steep cosine (alpha 6) that saturates confidence to ~1
-// everywhere a view faces the surface and collapses to ~0 only in a razor-thin
-// grazing sliver. A confidence threshold is structurally blind to a join
-// between two well-seen views.
+// The visible seams in a projection bake are the SILHOUETTE joins where one
+// view's projection meets another ON THE 3D SURFACE (e.g. the front view of an
+// arm meeting the side view down the arm). ComfyUI colours each view slightly
+// differently, so a tonal step shows at that join. The goal of this pass is to
+// blend that step away smoothly.
 //
-// We instead reconstruct per-texel ownership exactly as the composite does
-// (the first layer in application order to cover a texel owns it — see
-// resolveProjectionLayersIntoImageData), find the texels straddling an
-// ownership CHANGE, grow a band of `seamWidth` texels outward from those
-// boundaries, and feather a blurred copy of the covered texture across the
-// band. Works for both the GPU and CPU bakes since it only needs coverageMask.
-export async function applySeamPostProcessing(textureCanvas, layerSnapshots, seamWidth, blurRadius, strength) {
+// The previous implementation reasoned entirely in UV/texel space: it seeded a
+// "seam" wherever two image-adjacent texels had different owners, and blurred
+// with a CSS blur() over the atlas. But in a UV atlas, image-adjacent texels
+// routinely belong to DIFFERENT islands (different parts of the mesh), so it
+// (a) flagged every UV-island border as a false seam and (b) smeared colours
+// across islands — the source of the heavy artifacts. It smoothed UV seams, the
+// exact opposite of what is wanted.
+//
+// This version is 3D / surface-aware (like fillHolesPostProcessing): it
+// rasterizes the mesh to recover each covered texel's world position, treats an
+// ownership change as a seam ONLY when the two texels are close in 3D (a real
+// silhouette join — UV-island borders are far in 3D and get rejected), grows
+// the band ALONG the surface, and smooths each band texel by a 3D gaussian
+// average over a small world-space ball. The ball straddles the silhouette seam
+// (so the average is a clean blend of the two views) but is far too small to
+// reach a different UV island, so no cross-island leakage. Needs the mesh; if it
+// is unavailable the pass is a no-op (better than smearing UV seams).
+export async function applySeamPostProcessing(textureCanvas, layerSnapshots, seamWidth, blurRadius, strength, texturableMesh, onProgress) {
   const w = textureCanvas.width
   const h = textureCanvas.height
   const pixelCount = w * h
@@ -811,111 +818,267 @@ export async function applySeamPostProcessing(textureCanvas, layerSnapshots, sea
 
   // 1. Reconstruct ownership: first layer (in order) to cover a texel owns it.
   const owner = new Int32Array(pixelCount).fill(-1)
+  let distinctOwners = 0
   for (let li = 0; li < layerSnapshots.length; li++) {
     const cov = layerSnapshots[li]?.coverageMask
     if (!cov) continue
+    let used = false
     for (let i = 0; i < pixelCount; i++) {
-      if (owner[i] < 0 && cov[i]) owner[i] = li
+      if (owner[i] < 0 && cov[i]) { owner[i] = li; used = true }
+    }
+    if (used) distinctOwners++
+  }
+  if (distinctOwners < 2) return  // single view: no inter-view silhouette joins
+
+  // The mesh is what lets us tell a real silhouette join from a UV-atlas border.
+  const meshes = []
+  if (texturableMesh?.root) {
+    texturableMesh.root.traverse(obj => {
+      if (obj.isMesh && obj.geometry && obj.geometry.attributes?.uv) meshes.push(obj)
+    })
+  }
+  if (meshes.length === 0) return
+
+  const ctx = textureCanvas.getContext('2d', { willReadFrequently: true }) || textureCanvas.getContext('2d')
+  const origData = ctx.getImageData(0, 0, w, h)
+  const srcPix = origData.data
+
+  // 2. Rasterize every UV triangle → per covered texel: 3D world position and the
+  //    local world-units-per-texel scale. This is what moves the rest of the pass
+  //    out of UV space and onto the surface.
+  const posMap = new Float32Array(pixelCount * 3)
+  const texelSize = new Float32Array(pixelCount)
+  const hasPos = new Uint8Array(pixelCount)
+  const textureConfig = texturableMesh.textureConfig
+
+  const vA = new THREE.Vector3(), vB = new THREE.Vector3(), vC = new THREE.Vector3()
+  const eAB = new THREE.Vector3(), eAC = new THREE.Vector3(), cross = new THREE.Vector3()
+  const uvA = new THREE.Vector2(), uvB = new THREE.Vector2(), uvC = new THREE.Vector2()
+
+  for (let mi = 0; mi < meshes.length; mi++) {
+    const mesh = meshes[mi]
+    mesh.updateWorldMatrix(true, false)
+    const matrixWorld = mesh.matrixWorld
+    const geom = mesh.geometry
+    const posAttr = geom.attributes.position
+    const uvAttr = geom.attributes.uv
+    const indexAttr = geom.index
+    const triCount = indexAttr ? indexAttr.count / 3 : posAttr.count / 3
+
+    for (let t = 0; t < triCount; t++) {
+      const base = t * 3
+      const i0 = indexAttr ? indexAttr.getX(base) : base
+      const i1 = indexAttr ? indexAttr.getX(base + 1) : base + 1
+      const i2 = indexAttr ? indexAttr.getX(base + 2) : base + 2
+
+      vA.fromBufferAttribute(posAttr, i0).applyMatrix4(matrixWorld)
+      vB.fromBufferAttribute(posAttr, i1).applyMatrix4(matrixWorld)
+      vC.fromBufferAttribute(posAttr, i2).applyMatrix4(matrixWorld)
+
+      uvA.set(uvAttr.getX(i0), uvAttr.getY(i0))
+      uvB.set(uvAttr.getX(i1), uvAttr.getY(i1))
+      uvC.set(uvAttr.getX(i2), uvAttr.getY(i2))
+      const pA = mapUvToCanvasPoint(uvA, w, h, textureConfig)
+      const pB = mapUvToCanvasPoint(uvB, w, h, textureConfig)
+      const pC = mapUvToCanvasPoint(uvC, w, h, textureConfig)
+      const x0 = pA.x, y0 = pA.y, x1 = pB.x, y1 = pB.y, x2 = pC.x, y2 = pC.y
+
+      const denom = (y1 - y2) * (x0 - x2) + (x2 - x1) * (y0 - y2)
+      if (Math.abs(denom) < 1e-10) continue
+
+      // World-units per texel for this triangle = sqrt(3D area / UV-pixel area).
+      eAB.subVectors(vB, vA); eAC.subVectors(vC, vA)
+      const area3D = 0.5 * cross.crossVectors(eAB, eAC).length()
+      const areaPx = 0.5 * Math.abs((x1 - x0) * (y2 - y0) - (x2 - x0) * (y1 - y0))
+      const wpt = Math.sqrt(area3D / Math.max(areaPx, 1e-9))
+
+      const invDenom = 1 / denom
+      const minPx = Math.max(0, Math.floor(Math.min(x0, x1, x2)))
+      const maxPx = Math.min(w - 1, Math.ceil(Math.max(x0, x1, x2)))
+      const minPy = Math.max(0, Math.floor(Math.min(y0, y1, y2)))
+      const maxPy = Math.min(h - 1, Math.ceil(Math.max(y0, y1, y2)))
+      const baryEps = -1e-3
+
+      for (let py = minPy; py <= maxPy; py++) {
+        const rowBase = py * w
+        for (let px = minPx; px <= maxPx; px++) {
+          const idx = rowBase + px
+          if (owner[idx] < 0 || hasPos[idx]) continue
+          const fx = px + 0.5, fy = py + 0.5
+          const wa = ((y1 - y2) * (fx - x2) + (x2 - x1) * (fy - y2)) * invDenom
+          const wb = ((y2 - y0) * (fx - x2) + (x0 - x2) * (fy - y2)) * invDenom
+          const wc = 1 - wa - wb
+          if (wa < baryEps || wb < baryEps || wc < baryEps) continue
+          const m = idx * 3
+          posMap[m]     = wa * vA.x + wb * vB.x + wc * vC.x
+          posMap[m + 1] = wa * vA.y + wb * vB.y + wc * vC.y
+          posMap[m + 2] = wa * vA.z + wb * vB.z + wc * vC.z
+          texelSize[idx] = wpt
+          hasPos[idx] = 1
+        }
+      }
     }
   }
+  if (onProgress) onProgress(0.4)
 
-  // 2. Seed seam texels: a covered texel whose 4-neighbour is owned by a
-  //    DIFFERENT view. Coverage-vs-hole borders are deliberately excluded — Fill
-  //    Holes owns those, and treating them as seams would soften the silhouette.
-  const frontier = []
+  // Mean world-per-texel — used for grid sizing.
+  let sizeSum = 0, sizeN = 0
+  for (let i = 0; i < pixelCount; i++) if (hasPos[i]) { sizeSum += texelSize[i]; sizeN++ }
+  if (sizeN === 0) return
+  const avgWpt = sizeSum / sizeN
+
+  // On-surface test for two image-adjacent texels: close in 3D ⇒ the same surface
+  // region (a real seam can cross here); far ⇒ a UV-atlas island border (reject).
+  const ADJ = 4
+  const onSurface = (a, b) => {
+    if (!hasPos[a] || !hasPos[b]) return false
+    const ma = a * 3, mb = b * 3
+    const dx = posMap[ma] - posMap[mb]
+    const dy = posMap[ma + 1] - posMap[mb + 1]
+    const dz = posMap[ma + 2] - posMap[mb + 2]
+    const lim = ADJ * Math.max(texelSize[a], texelSize[b])
+    return dx * dx + dy * dy + dz * dz <= lim * lim
+  }
+
+  // 3. Seed seam texels: covered, with an ON-SURFACE 4-neighbour owned by a
+  //    DIFFERENT view. UV-island borders fail onSurface, so they never seed —
+  //    this is the fix for "smooths UV seams instead of silhouette seams".
+  let frontier = []
   for (let y = 0; y < h; y++) {
     for (let x = 0; x < w; x++) {
       const i = y * w + x
       const o = owner[i]
-      if (o < 0) continue
-      if ((x > 0     && owner[i - 1] >= 0 && owner[i - 1] !== o)
-       || (x < w - 1 && owner[i + 1] >= 0 && owner[i + 1] !== o)
-       || (y > 0     && owner[i - w] >= 0 && owner[i - w] !== o)
-       || (y < h - 1 && owner[i + w] >= 0 && owner[i + w] !== o)) {
+      if (o < 0 || !hasPos[i]) continue
+      if ((x > 0     && owner[i - 1] >= 0 && owner[i - 1] !== o && onSurface(i, i - 1))
+       || (x < w - 1 && owner[i + 1] >= 0 && owner[i + 1] !== o && onSurface(i, i + 1))
+       || (y > 0     && owner[i - w] >= 0 && owner[i - w] !== o && onSurface(i, i - w))
+       || (y < h - 1 && owner[i + w] >= 0 && owner[i + w] !== o && onSurface(i, i + w))) {
         frontier.push(i)
       }
     }
   }
-  if (frontier.length === 0) return  // single view / no inter-view joins to smooth
+  if (frontier.length === 0) return  // no real silhouette joins to smooth
 
-  // 3. Multi-source BFS over covered texels → distance (in texels) from the
-  //    nearest seam, capped at the band radius. "Seam width" (0..1) maps to that
-  //    radius, scaled to texture resolution so it behaves the same at any size.
+  // 4. BFS the band ALONG the surface (only crossing on-surface edges), capped at
+  //    the band radius. "Seam width" (0..1) maps to that radius, resolution-scaled.
   const bandRadius = Math.max(1, Math.min(64, Math.round(seamWidth * Math.max(w, h) / 64)))
   const dist = new Int32Array(pixelCount).fill(-1)
   for (let k = 0; k < frontier.length; k++) dist[frontier[k]] = 0
-  let cur = frontier
-  for (let d = 0; d < bandRadius && cur.length > 0; d++) {
+  for (let d = 0; d < bandRadius && frontier.length > 0; d++) {
     const next = []
-    for (let k = 0; k < cur.length; k++) {
-      const i = cur[k]
-      const x = i % w
-      const y = (i / w) | 0
-      if (x > 0)     { const n = i - 1; if (owner[n] >= 0 && dist[n] < 0) { dist[n] = d + 1; next.push(n) } }
-      if (x < w - 1) { const n = i + 1; if (owner[n] >= 0 && dist[n] < 0) { dist[n] = d + 1; next.push(n) } }
-      if (y > 0)     { const n = i - w; if (owner[n] >= 0 && dist[n] < 0) { dist[n] = d + 1; next.push(n) } }
-      if (y < h - 1) { const n = i + w; if (owner[n] >= 0 && dist[n] < 0) { dist[n] = d + 1; next.push(n) } }
+    for (let k = 0; k < frontier.length; k++) {
+      const i = frontier[k]
+      const x = i % w, y = (i / w) | 0
+      if (x > 0)     { const n = i - 1; if (owner[n] >= 0 && dist[n] < 0 && onSurface(i, n)) { dist[n] = d + 1; next.push(n) } }
+      if (x < w - 1) { const n = i + 1; if (owner[n] >= 0 && dist[n] < 0 && onSurface(i, n)) { dist[n] = d + 1; next.push(n) } }
+      if (y > 0)     { const n = i - w; if (owner[n] >= 0 && dist[n] < 0 && onSurface(i, n)) { dist[n] = d + 1; next.push(n) } }
+      if (y < h - 1) { const n = i + w; if (owner[n] >= 0 && dist[n] < 0 && onSurface(i, n)) { dist[n] = d + 1; next.push(n) } }
     }
-    cur = next
+    frontier = next
   }
+  if (onProgress) onProgress(0.55)
 
-  // 4. Blur a coverage-masked copy of the current texture (covered colours only),
-  //    so the blur near a boundary is the average of the two views that meet there.
-  const ctx = textureCanvas.getContext('2d')
-  const origData = ctx.getImageData(0, 0, w, h)
-
-  const maskCanvas = document.createElement('canvas')
-  maskCanvas.width = w
-  maskCanvas.height = h
-  const maskCtx = maskCanvas.getContext('2d')
-  const maskImg = maskCtx.createImageData(w, h)
+  // 5. Spatial hash of every covered texel (by 3D position) for fast ball queries.
+  let minX = Infinity, minY = Infinity, minZ = Infinity
+  let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity
   for (let i = 0; i < pixelCount; i++) {
-    if (owner[i] < 0) continue
-    const j = i * 4
-    maskImg.data[j]     = origData.data[j]
-    maskImg.data[j + 1] = origData.data[j + 1]
-    maskImg.data[j + 2] = origData.data[j + 2]
-    maskImg.data[j + 3] = 255
+    if (!hasPos[i]) continue
+    const m = i * 3
+    const x = posMap[m], y = posMap[m + 1], z = posMap[m + 2]
+    if (x < minX) minX = x; if (x > maxX) maxX = x
+    if (y < minY) minY = y; if (y > maxY) maxY = y
+    if (z < minZ) minZ = z; if (z > maxZ) maxZ = z
   }
-  maskCtx.putImageData(maskImg, 0, 0)
+  const bbox = Math.max(maxX - minX, maxY - minY, maxZ - minZ, 1e-6)
+  const blurR = Math.max(1, Math.min(64, Math.round(blurRadius)))
+  // Cell ≈ one blur radius wide, but floored so the grid never overflows the key
+  // packing (≤ ~400 cells/axis keeps each index < 1024 for the 10-bit pack below).
+  const cellSize = Math.max(blurR * avgWpt, bbox / 400)
+  const invCell = 1 / cellSize
+  const hashCell = (cx, cy, cz) => ((cx + 512) << 20) | ((cy + 512) << 10) | (cz + 512)
+  const grid = new Map()
+  for (let i = 0; i < pixelCount; i++) {
+    if (!hasPos[i]) continue
+    const m = i * 3
+    const cx = Math.floor((posMap[m] - minX) * invCell)
+    const cy = Math.floor((posMap[m + 1] - minY) * invCell)
+    const cz = Math.floor((posMap[m + 2] - minZ) * invCell)
+    const key = hashCell(cx, cy, cz)
+    let cell = grid.get(key)
+    if (!cell) { cell = []; grid.set(key, cell) }
+    cell.push(i)
+  }
 
-  // Blur with CSS filter — GPU-accelerated, spreads covered colours across the seam.
-  const blurCanvas = document.createElement('canvas')
-  blurCanvas.width = w
-  blurCanvas.height = h
-  const blurCtx = blurCanvas.getContext('2d')
-  blurCtx.filter = `blur(${blurRadius}px)`
-  blurCtx.drawImage(maskCanvas, 0, 0)
-  blurCtx.filter = 'none'
-  const blurData = blurCtx.getImageData(0, 0, w, h).data
+  // 6. Smooth each band texel by a 3D gaussian average of nearby covered texels.
+  //    The ball spans the silhouette seam (blending the two views) but is tiny in
+  //    world space, so it cannot reach a different UV island. Feather the blend by
+  //    distance-from-seam so interiors are untouched.
+  const out = new Uint8ClampedArray(srcPix)
+  let processed = 0
+  let lastYield = performance.now()
 
-  // 5. Feather the blurred colour across the band: full strength at the boundary
-  //    (dist 0) ramping smoothly to 0 at bandRadius.
-  const outData = new Uint8ClampedArray(origData.data)
   for (let i = 0; i < pixelCount; i++) {
     const d = dist[i]
-    if (d < 0) continue
+    if (d < 0 || !hasPos[i]) continue
+
+    const m = i * 3
+    const qx = posMap[m], qy = posMap[m + 1], qz = posMap[m + 2]
+    const radius = Math.max(blurR * texelSize[i], cellSize * 0.5)
+    const r2 = radius * radius
+    const sigma = radius * 0.6
+    const twoSigma2 = 2 * sigma * sigma
+    const baseCx = Math.floor((qx - minX) * invCell)
+    const baseCy = Math.floor((qy - minY) * invCell)
+    const baseCz = Math.floor((qz - minZ) * invCell)
+    const cr = Math.max(1, Math.ceil(radius * invCell))
+
+    let sumR = 0, sumG = 0, sumB = 0, sumW = 0
+    for (let dz = -cr; dz <= cr; dz++) {
+      for (let dy = -cr; dy <= cr; dy++) {
+        for (let dx = -cr; dx <= cr; dx++) {
+          const cell = grid.get(hashCell(baseCx + dx, baseCy + dy, baseCz + dz))
+          if (!cell) continue
+          for (let c = 0; c < cell.length; c++) {
+            const s = cell[c]
+            const sm = s * 3
+            const ddx = posMap[sm] - qx, ddy = posMap[sm + 1] - qy, ddz = posMap[sm + 2] - qz
+            const dd = ddx * ddx + ddy * ddy + ddz * ddz
+            if (dd > r2) continue
+            const wgt = Math.exp(-dd / twoSigma2)
+            const sj = s * 4
+            sumR += srcPix[sj] * wgt
+            sumG += srcPix[sj + 1] * wgt
+            sumB += srcPix[sj + 2] * wgt
+            sumW += wgt
+          }
+        }
+      }
+    }
+    if (sumW <= 1e-6) continue
+
+    const t = 1 - d / bandRadius            // 1 at the seam → 0 at the band edge
+    const feather = t * t * (3 - 2 * t)
+    const f = feather * strength
+    if (f <= 1e-3) continue
+
     const j = i * 4
-    const blurAlpha = blurData[j + 3] / 255
-    if (blurAlpha < 0.01) continue
+    out[j]     = Math.round(srcPix[j]     * (1 - f) + (sumR / sumW) * f)
+    out[j + 1] = Math.round(srcPix[j + 1] * (1 - f) + (sumG / sumW) * f)
+    out[j + 2] = Math.round(srcPix[j + 2] * (1 - f) + (sumB / sumW) * f)
 
-    const t = 1 - d / bandRadius  // 1 at the seam → 0 at the band edge
-    const smooth = t * t * (3 - 2 * t)
-    const blendFactor = smooth * strength
-    if (blendFactor <= 1e-3) continue
-
-    // Unpremultiply blur colour
-    const bR = blurData[j]     / blurAlpha
-    const bG = blurData[j + 1] / blurAlpha
-    const bB = blurData[j + 2] / blurAlpha
-
-    outData[j]     = Math.round(outData[j]     * (1 - blendFactor) + bR * blendFactor)
-    outData[j + 1] = Math.round(outData[j + 1] * (1 - blendFactor) + bG * blendFactor)
-    outData[j + 2] = Math.round(outData[j + 2] * (1 - blendFactor) + bB * blendFactor)
-    // alpha stays 255
+    processed++
+    if ((processed & 0x3FFF) === 0) {
+      const now = performance.now()
+      if (now - lastYield > 30) {
+        await new Promise(r => setTimeout(r, 0))
+        lastYield = now
+      }
+    }
   }
 
-  ctx.putImageData(new ImageData(outData, w, h), 0, 0)
+  if (onProgress) onProgress(0.98)
+  ctx.putImageData(new ImageData(out, w, h), 0, 0)
+  if (onProgress) onProgress(1)
 }
 
 // 3D-aware hole filling. UV-space proximity is unreliable for AI-generated
