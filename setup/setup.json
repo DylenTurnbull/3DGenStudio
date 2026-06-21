@@ -135,7 +135,23 @@
 					"Outputs": [
 						{ "Node": "35", "Name": "Save Image", "Type": "Image" }
 					]
-				}				
+				},
+				{
+					"Name": "Mesh Projection with QwenImageEdit - Delight 2nd pass",
+					"File": "setup/Mesh Projection with QwenImageEdit - Delight 2nd pass.json",
+					"Inputs": [
+						{ "Node": "21", "Input": "image",  "Name": "Position Image",    "Type": "Image"  },
+						{ "Node": "22", "Input": "image",  "Name": "Reference Image",   "Type": "Image"  },
+						{ "Node": "8",  "Input": "prompt", "Name": "Prompt",            "Type": "String" },
+						{ "Node": "20", "Input": "seed",   "Name": "Seed",              "Type": "Number" },
+						{ "Node": "34", "Input": "value",  "Name": "Image Resolution",  "Type": "Number" },
+						{ "Node": "36", "Input": "mask_offset",  "Name": "RMBG - Mask Offset",  "Type": "Number" },
+						{ "Node": "36", "Input": "mask_blur",  "Name": "RMBG - Mask Blur",  "Type": "Number" }
+					],
+					"Outputs": [
+						{ "Node": "35", "Name": "Save Image", "Type": "Image" }
+					]
+				}		
 			]
 		},
 		{
@@ -287,6 +303,64 @@
 			]
 		},
 		{
+			"Name": "Flux2-Klein4B",
+			"Models": {				
+				"F16": { "FileName": "flux-2-klein-4b-F16.gguf",   "Url": "https://huggingface.co/unsloth/FLUX.2-klein-4B-GGUF/resolve/main/flux-2-klein-4b-F16.gguf?download=true",   "Size": 7.8 },
+				"BF16":  { "FileName": "flux-2-klein-4b-BF16.gguf",    "Url": "https://huggingface.co/unsloth/FLUX.2-klein-4B-GGUF/resolve/main/flux-2-klein-4b-BF16.gguf?download=true",    "Size": 7.8 },
+				"Q8": { "FileName": "flux-2-klein-4b-Q8_0.gguf",   "Url": "https://huggingface.co/unsloth/FLUX.2-klein-4B-GGUF/resolve/main/flux-2-klein-4b-Q8_0.gguf?download=true",   "Size": 4.3 },
+				"Q6": { "FileName": "flux-2-klein-4b-Q6_K.gguf",   "Url": "https://huggingface.co/unsloth/FLUX.2-klein-4B-GGUF/resolve/main/flux-2-klein-4b-Q6_K.gguf?download=true",   "Size": 3.4 },
+				"Q5": { "FileName": "flux-2-klein-4b-Q5_K_M.gguf",   "Url": "https://huggingface.co/unsloth/FLUX.2-klein-4B-GGUF/resolve/main/flux-2-klein-4b-Q5_K_M.gguf?download=true",   "Size": 3.1 },
+				"Q4": { "FileName": "flux-2-klein-4b-Q4_K_M.gguf",   "Url": "https://huggingface.co/unsloth/FLUX.2-klein-4B-GGUF/resolve/main/flux-2-klein-4b-Q4_K_M.gguf?download=true",   "Size": 2.6 },
+				"Q3": { "FileName": "flux-2-klein-4b-Q3_K_M.gguf",   "Url": "https://huggingface.co/unsloth/FLUX.2-klein-4B-GGUF/resolve/main/flux-2-klein-4b-Q3_K_M.gguf?download=true",   "Size": 2.1 },
+				"Q2": { "FileName": "flux-2-klein-4b-Q2_K.gguf",   "Url": "https://huggingface.co/unsloth/FLUX.2-klein-4B-GGUF/resolve/main/flux-2-klein-4b-Q2_K.gguf?download=true",   "Size": 1.8 }
+			},
+			"VAE":         { "FileName": "flux2-vae.safetensors",                        "Url": "https://huggingface.co/Comfy-Org/flux2-dev/resolve/main/split_files/vae/flux2-vae.safetensors?download=true",                                     "Size": 0.3  },
+			"TextEncoder": { "FileName": "qwen_3_4b_fp8_mixed.safetensors", "Url": "https://huggingface.co/Comfy-Org/z_image_turbo/resolve/main/split_files/text_encoders/qwen_3_4b_fp8_mixed.safetensors?download=true",          "Size": 5.6 },
+			"LoRA":[        				
+				{ "FileName": "PBRFusion4_Albedo.safetensors", "Url": "https://huggingface.co/NightRaven109/PBRFusion4/resolve/main/PBRFusion4_Albedo.safetensors?download=true", "Size": 0.1 }
+			],
+			"Workflows": [
+				{
+					"Name": "Gen Image with Flux2Klein4B",
+					"File": "setup/Gen Image with Flux2Klein4B.json",
+					"Inputs": [
+						{ "Node": "6", "Input": "text",  "Name": "Prompt", "Type": "String" },
+						{ "Node": "7",  "Input": "noise_seed",  "Name": "Seed",   "Type": "Number" },
+						{ "Node": "8:17",  "Input": "steps", "Name": "Steps",  "Type": "Number" },
+						{ "Node": "65",  "Input": "value", "Name": "Image Resolution",  "Type": "Number" }
+					],
+					"Outputs": [
+						{ "Node": "63", "Name": "Save Image", "Type": "Image" }
+					]
+				},
+				{
+					"Name": "Edit Image with Flux2Klein4B",
+					"File": "setup/Edit Image with Flux2Klein4B.json",
+					"Inputs": [
+						{ "Node": "1", "Input": "image",  "Name": "Input Image",    "Type": "Image"  },
+						{ "Node": "6",  "Input": "text", "Name": "Prompt",            "Type": "String" },
+						{ "Node": "7", "Input": "noise_seed",   "Name": "Seed",              "Type": "Number" },
+						{ "Node": "66", "Input": "value",  "Name": "Image Resolution",  "Type": "Number" }
+					],
+					"Outputs": [
+						{ "Node": "70", "Name": "Save Image", "Type": "Image" }
+					]
+				},
+				{
+					"Name": "Albedo Image with Flux2Klein4B",
+					"File": "setup/Albedo Image with Flux2Klein4B.json",
+					"Inputs": [
+						{ "Node": "1", "Input": "image",  "Name": "Input Image",    "Type": "Image"  },
+						{ "Node": "7", "Input": "noise_seed",   "Name": "Seed",              "Type": "Number" },
+						{ "Node": "66", "Input": "value",  "Name": "Image Resolution",  "Type": "Number" }
+					],
+					"Outputs": [
+						{ "Node": "70", "Name": "Save Image", "Type": "Image" }
+					]
+				}
+			]
+		},
+		{
 			"Name": "Flux2-Klein9B",
 			"Models": {				
 				"F16": { "FileName": "flux-2-klein-9b-F16.gguf",   "Url": "https://huggingface.co/unsloth/FLUX.2-klein-9B-GGUF/resolve/main/flux-2-klein-9b-F16.gguf?download=true",   "Size": 18.2 },
@@ -377,7 +451,7 @@
 					]
 				}
 			]
-		}		
+		}			
 	],
 	"OtherWorkflows":[
 		{

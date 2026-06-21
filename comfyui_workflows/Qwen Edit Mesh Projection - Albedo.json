@@ -456,7 +456,7 @@
   },
   "77:74": {
     "inputs": {
-      "unet_name": "flux-2-klein-9b-Q8_0.gguf"
+      "unet_name": "flux-2-klein-4b-F16.gguf"
     },
     "class_type": "UnetLoaderGGUF",
     "_meta": {
@@ -465,7 +465,7 @@
   },
   "77:75": {
     "inputs": {
-      "clip_name": "qwen_3_8b_fp8mixed.safetensors",
+      "clip_name": "qwen_3_4b_fp8_mixed.safetensors",
       "type": "flux2",
       "device": "default"
     },
@@ -476,8 +476,8 @@
   },
   "77:76": {
     "inputs": {
-      "lora_name": "flux2-klein9b-albedo-lora.safetensors",
-      "strength_model": 0.8,
+      "lora_name": "PBRFusion4_Albedo.safetensors",
+      "strength_model": 1,
       "model": [
         "77:74",
         0
