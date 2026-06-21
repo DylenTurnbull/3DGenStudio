@@ -428,6 +428,7 @@
 					"File": "setup/Albedo Image with Flux2Klein9B.json",
 					"Inputs": [
 						{ "Node": "1", "Input": "image",  "Name": "Input Image",    "Type": "Image"  },
+						{ "Node": "61", "Input": "strength_model",   "Name": "Strength",              "Type": "Number" },
 						{ "Node": "7", "Input": "noise_seed",   "Name": "Seed",              "Type": "Number" },
 						{ "Node": "66", "Input": "value",  "Name": "Image Resolution",  "Type": "Number" }
 					],
@@ -528,6 +529,20 @@
 			"Outputs": [
 				{ "Node": "3", "Name": "Output Text", "Type": "String" }
 			]
-		}			
+		},
+		{
+			"Name": "Refine Mesh with Trellis2",
+			"File": "setup/Refine Mesh with Trellis2.json",
+			"Inputs": [
+				{ "Node": "3", "Input": "glb_path",  "Name": "Source Image", "Type": "Mesh" },
+				{ "Node": "2", "Input": "image",  "Name": "Source Image", "Type": "Image" },
+				{ "Node": "28",  "Input": "value",  "Name": "Target Face Number",   "Type": "Number" },
+				{ "Node": "4",  "Input": "seed",  "Name": "Seed",   "Type": "Number" },
+				{ "Node": "4",  "Input": "resolution",  "Name": "Resolution",   "Type": "Number" }
+			],
+			"Outputs": [
+				{ "Node": "7", "Name": "Save Mesh", "Type": "Mesh" }
+			]
+		}
 	]
 }
