@@ -8,6 +8,7 @@ export default function Footer({ variant = 'default', onChangeLogClick }) {
     const fetchStats = async () => {
       try {
         const response = await fetch('http://localhost:3001/api/system/stats');
+        if (!response.ok) return; // stats not ready yet — keep showing previous value
         const data = await response.json();
         setStats(data);
       } catch (err) {
@@ -22,7 +23,7 @@ export default function Footer({ variant = 'default', onChangeLogClick }) {
 
   // Helper to render the metrics block
   const renderMetrics = () => {
-    if (!stats) return <span>Loading Metrics...</span>;
+    if (!stats || !stats.gpu) return <span>Loading Metrics...</span>;
     return (
       <>
         <span>CPU: {stats.cpu}%</span>

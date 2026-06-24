@@ -5906,7 +5906,17 @@ app.post('/api/settings', async (req, res) => {
   }
 }); */
 
-app.get('/api/system/stats', async (req, res) => {
+// si.graphics() on Windows shells out to WMI/PowerShell and can take several
+// seconds. Running it per-request (the footer polls every 3s) stacked up slow
+// requests and saturated the browser's 6-connections-per-origin limit, stalling
+// every other API call. Instead we refresh a cached snapshot in the background
+// and serve it instantly.
+let cachedSystemStats = null;
+let systemStatsRefreshing = false;
+
+async function refreshSystemStats() {
+  if (systemStatsRefreshing) return;
+  systemStatsRefreshing = true;
   try {
     const [cpu, mem, graphics] = await Promise.all([
       si.currentLoad(),
@@ -5920,12 +5930,12 @@ app.get('/api/system/stats', async (req, res) => {
       return (current.vram > (prev.vram || 0)) ? current : prev;
     }, graphics.controllers[0] || {});
 
-    // 2. Universal Mapping: Check for both 'memoryUsed' (NVIDIA style) 
+    // 2. Universal Mapping: Check for both 'memoryUsed' (NVIDIA style)
     // and 'vramUsage' (AMD/Standard style)
     const rawVramUsed = gpu.memoryUsed || gpu.vramUsage || 0;
     const rawVramTotal = gpu.memoryTotal || gpu.vram || 0;
 
-    res.json({
+    cachedSystemStats = {
       cpu: Math.round(cpu.currentLoad),
       ram: {
         used: (mem.active / (1024 ** 3)).toFixed(1),
@@ -5937,13 +5947,25 @@ app.get('/api/system/stats', async (req, res) => {
         // Convert to GB, handling the 0 case gracefully
         vramUsed: rawVramUsed > 0 ? (rawVramUsed / 1024).toFixed(1) : "0.0",
         vramTotal: rawVramTotal > 0 ? (rawVramTotal / 1024).toFixed(1) : "0.0",
-        utilization: gpu.utilizationGpu || 0 
+        utilization: gpu.utilizationGpu || 0
       }
-    });
+    };
   } catch (err) {
     console.error('Stats Error:', err);
-    res.status(500).json({ error: 'Failed to fetch stats' });
+  } finally {
+    systemStatsRefreshing = false;
   }
+}
+
+// Kick off the first refresh immediately, then keep it warm in the background.
+refreshSystemStats();
+setInterval(refreshSystemStats, 5000);
+
+app.get('/api/system/stats', (req, res) => {
+  if (!cachedSystemStats) {
+    return res.status(503).json({ error: 'Stats not ready yet' });
+  }
+  res.json(cachedSystemStats);
 });
 
 // ─── INITIAL SETUP ───
