@@ -12,7 +12,7 @@ from ..schemas import AutoRetopoOptions
 from .autoretopo import AutoRetopo, RetopoConfig
 
 
-def run_auto_retopo(mesh: trimesh.Trimesh, options: AutoRetopoOptions) -> tuple[trimesh.Trimesh, dict, None]:
+def run_auto_retopo(mesh: trimesh.Trimesh, options: AutoRetopoOptions, progress=None) -> tuple[trimesh.Trimesh, dict, None]:
     cfg = RetopoConfig(
         target_faces=options.target_faces,
         quads=options.quads,
@@ -34,7 +34,7 @@ def run_auto_retopo(mesh: trimesh.Trimesh, options: AutoRetopoOptions) -> tuple[
         verbose=False,
     )
 
-    result = AutoRetopo(cfg).run(mesh)
+    result = AutoRetopo(cfg).run(mesh, progress=progress)
 
     stats = {
         "metrics": result.metrics,

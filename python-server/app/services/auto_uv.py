@@ -40,8 +40,31 @@ def _render_uv_preview(result) -> bytes | None:
                 pass
 
 
-def run_auto_uv(mesh: trimesh.Trimesh, options: AutoUvOptions) -> tuple[trimesh.Trimesh, dict, bytes | None]:
+# autouv.unwrap reports a per-stage fraction (each 0..1). Map each stage into a
+# slice of the global [0,1] bar, with a human-readable label for the UI.
+_UV_STAGE_RANGES = {
+    "weld": (0.00, 0.08),
+    "segment": (0.08, 0.22),
+    "refine": (0.22, 0.45),
+    "parameterize": (0.45, 0.95),
+}
+_UV_STAGE_LABELS = {
+    "weld": "Welding vertices",
+    "segment": "Segmenting charts",
+    "refine": "Refining charts",
+    "parameterize": "Flattening charts",
+}
+
+
+def run_auto_uv(mesh: trimesh.Trimesh, options: AutoUvOptions, progress=None) -> tuple[trimesh.Trimesh, dict, bytes | None]:
     src = autouv.Mesh(np.asarray(mesh.vertices), np.asarray(mesh.faces))
+
+    unwrap_progress = None
+    if progress is not None:
+        def unwrap_progress(stage, frac):  # noqa: F811
+            lo, hi = _UV_STAGE_RANGES.get(stage, (0.95, 0.98))
+            g = lo + (hi - lo) * max(0.0, min(1.0, float(frac)))
+            progress(stage, g, _UV_STAGE_LABELS.get(stage, stage))
 
     result = autouv.unwrap(
         src,
@@ -59,8 +82,12 @@ def run_auto_uv(mesh: trimesh.Trimesh, options: AutoUvOptions) -> tuple[trimesh.
         arap_iters=options.arap_iters,
         weld=options.weld,
         weld_tol_frac=options.weld_tol_frac,
+        progress=unwrap_progress,
         verbose=False,
     )
+
+    if progress is not None:
+        progress("render", 0.97, "Rendering UV preview")
 
     # Build a GLB-ready mesh with the new vertex UV channel (seam-split geometry).
     out = trimesh.Trimesh(vertices=result.vertices, faces=result.faces, process=False)

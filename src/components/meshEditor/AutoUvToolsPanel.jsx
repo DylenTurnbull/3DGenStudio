@@ -3,12 +3,14 @@
 // Presentational: option state + handlers come from MeshEditorPage.
 import { RangeField, NumberField, ToggleField, SelectField } from './MeshToolField'
 import MeshToolResult from './MeshToolResult'
+import MeshToolProgress from './MeshToolProgress'
 
 export default function AutoUvToolsPanel({
   options,
   setOption,
   running,
   result,
+  progress,
   onRun,
   onKeepResult,
   onRevertResult,
@@ -31,6 +33,8 @@ export default function AutoUvToolsPanel({
           <span className="material-symbols-outlined">{running ? 'progress_activity' : 'auto_awesome'}</span>
           <span>{running ? 'Unwrapping…' : 'Run Auto UV'}</span>
         </button>
+
+        {running && <MeshToolProgress progress={progress} />}
 
         {result && (
           <MeshToolResult

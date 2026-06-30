@@ -399,6 +399,8 @@ export default function MeshEditorPage() {
   const [autoRetopoRunning, setAutoRetopoRunning] = useState(false)
   const [autoUvResult, setAutoUvResult] = useState(null)
   const [autoRetopoResult, setAutoRetopoResult] = useState(null)
+  const [autoUvProgress, setAutoUvProgress] = useState(null)
+  const [autoRetopoProgress, setAutoRetopoProgress] = useState(null)
   const [booleanOperation, setBooleanOperation] = useState('out')
   const [booleanPlaceMode, setBooleanPlaceMode] = useState(false)
   const [booleanBrushSource, setBooleanBrushSource] = useState('asset')
@@ -3753,18 +3755,23 @@ export default function MeshEditorPage() {
   // pre-op mesh onto the modeling undo stack, so "Revert" is just an undo.
   // After applying, the texturable-mesh state is rebuilt so the new UVs (Auto
   // UV) immediately enable painting/texturing/projection.
-  const runMeshTool = useCallback(async (service, options, { setRunning, setResult, buildRows, label }) => {
+  const runMeshTool = useCallback(async (service, options, { setRunning, setResult, setProgress, buildRows, label }) => {
     if (!geometry || autoUvRunning || autoRetopoRunning) {
       return
     }
     setRunning(true)
     setResult(null)
+    setProgress({ stage: 'start', frac: 0, message: `${label} starting…` })
     setError('')
     setFeedback(`${label}…`)
     try {
       const glbBuffer = await exportGeometryToGlb(geometry)
       const meshBlob = new Blob([glbBuffer], { type: 'model/gltf-binary' })
-      const { blob, stats, previewUrl } = await service(meshBlob, { options, fileName: 'mesh.glb' })
+      const { blob, stats, previewUrl } = await service(meshBlob, {
+        options,
+        fileName: 'mesh.glb',
+        onProgress: evt => setProgress(evt),
+      })
       const resultBuffer = await blob.arrayBuffer()
       const nextGeometry = await loadEditableGeometryFromGlbBuffer(resultBuffer)
       applyGeometryUpdate(nextGeometry, [], { pushUndo: true })
@@ -3782,6 +3789,7 @@ export default function MeshEditorPage() {
       setError(err?.message || `${label} failed.`)
     } finally {
       setRunning(false)
+      setProgress(null)
     }
   }, [geometry, autoUvRunning, autoRetopoRunning, applyGeometryUpdate, buildTexturableFromGeometry, blankTextureSize])
 
@@ -3789,6 +3797,7 @@ export default function MeshEditorPage() {
     runMeshTool(runAutoUvService, autoUvOptions, {
       setRunning: setAutoUvRunning,
       setResult: setAutoUvResult,
+      setProgress: setAutoUvProgress,
       label: 'Auto UV',
       buildRows: stats => {
         const t = stats?.tool || {}
@@ -3806,6 +3815,7 @@ export default function MeshEditorPage() {
     runMeshTool(runAutoRetopoService, autoRetopoOptions, {
       setRunning: setAutoRetopoRunning,
       setResult: setAutoRetopoResult,
+      setProgress: setAutoRetopoProgress,
       label: 'Auto Retopo',
       buildRows: stats => {
         const m = stats?.tool?.metrics || {}
@@ -5925,7 +5935,7 @@ export default function MeshEditorPage() {
                 ) : activeMenu === 'autouv' ? (
                   <AutoUvToolsPanel {...{
                     options: autoUvOptions, setOption: setAutoUvOption,
-                    running: autoUvRunning, result: autoUvResult,
+                    running: autoUvRunning, result: autoUvResult, progress: autoUvProgress,
                     onRun: handleRunAutoUv,
                     onKeepResult: () => setAutoUvResult(null),
                     onRevertResult: () => handleRevertMeshTool(setAutoUvResult),
@@ -5934,7 +5944,7 @@ export default function MeshEditorPage() {
                 ) : activeMenu === 'autoretopo' ? (
                   <AutoRetopoToolsPanel {...{
                     options: autoRetopoOptions, setOption: setAutoRetopoOption,
-                    running: autoRetopoRunning, result: autoRetopoResult,
+                    running: autoRetopoRunning, result: autoRetopoResult, progress: autoRetopoProgress,
                     onRun: handleRunAutoRetopo,
                     onKeepResult: () => setAutoRetopoResult(null),
                     onRevertResult: () => handleRevertMeshTool(setAutoRetopoResult),

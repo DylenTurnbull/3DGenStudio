@@ -48,11 +48,20 @@ class AutoRetopo:
         if self.cfg.verbose:
             print(*a, flush=True)
 
-    def run(self, path_or_mesh) -> RetopoResult:
+    def run(self, path_or_mesh, progress=None) -> RetopoResult:
         cfg = self.cfg
         t = {}
+
+        def report(stage, frac, message=""):
+            if progress is not None:
+                try:
+                    progress(stage, float(frac), message)
+                except Exception:
+                    pass
+
         t0 = time.time()
 
+        report("ingest", 0.02, "Loading mesh")
         if isinstance(path_or_mesh, str):
             original = ingest.load_mesh(path_or_mesh)
         else:
@@ -64,6 +73,7 @@ class AutoRetopo:
 
         # Stage 1: base layer
         t0 = time.time()
+        report("shell", 0.08, "Building watertight shell" if cfg.watertight else "Preparing surface")
         if cfg.watertight:
             res = cfg.shell_resolution
             fitted, peak_mb = shell.fit_resolution_to_budget(original, res, cfg.max_memory_gb)
@@ -81,6 +91,7 @@ class AutoRetopo:
 
         # Stage 2: clean topology
         t0 = time.time()
+        report("remesh", 0.38, "Building clean topology")
         V, F = remesh.isotropic_remesh(
             V, F, cfg.target_faces, adaptive=cfg.adaptive, iters=cfg.remesh_iters,
             feature_deg=cfg.feature_deg, calibrate_passes=cfg.calibrate_passes,
@@ -94,6 +105,7 @@ class AutoRetopo:
 
         # Stage 3: silhouette projection
         t0 = time.time()
+        report("project", 0.72, "Projecting to surface")
         if cfg.project:
             V = project.project_to_surface(
                 V, F, original, iters=cfg.project_iters,
@@ -108,6 +120,7 @@ class AutoRetopo:
         quad_faces = None
         t0 = time.time()
         if cfg.quads:
+            report("quad", 0.90, "Quad-dominant conversion")
             try:
                 Vq, quad_faces = remesh.to_quad_dominant(V, F)
                 self._log(f"[quad] quad-dominant conversion -> {len(quad_faces)} polys")
@@ -117,6 +130,7 @@ class AutoRetopo:
 
         # Stage 5: metrics
         t0 = time.time()
+        report("metrics", 0.95, "Computing metrics")
         m = metrics.compute_all(original, result_mesh)
         t["metrics"] = time.time() - t0
         t["total"] = sum(t.values())

@@ -3,12 +3,14 @@
 // result. Presentational: option state + handlers come from MeshEditorPage.
 import { RangeField, NumberField, ToggleField } from './MeshToolField'
 import MeshToolResult from './MeshToolResult'
+import MeshToolProgress from './MeshToolProgress'
 
 export default function AutoRetopoToolsPanel({
   options,
   setOption,
   running,
   result,
+  progress,
   onRun,
   onKeepResult,
   onRevertResult,
@@ -31,6 +33,8 @@ export default function AutoRetopoToolsPanel({
           <span className="material-symbols-outlined">{running ? 'progress_activity' : 'grain'}</span>
           <span>{running ? 'Retopologizing…' : 'Run Auto Retopo'}</span>
         </button>
+
+        {running && <MeshToolProgress progress={progress} />}
 
         {result && (
           <MeshToolResult

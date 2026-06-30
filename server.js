@@ -7,6 +7,7 @@ import { randomUUID } from 'crypto';
 import { createAssetEditRecord, createBrushChildRecord, resolveProjectImageSource, resolveProjectMeshSource } from './storage.js';
 import fs from 'fs/promises';
 import { createWriteStream, existsSync } from 'node:fs';
+import { Readable } from 'node:stream';
 import { spawn } from 'node:child_process';
 import process from 'node:process';
 import os from 'node:os';
@@ -4977,9 +4978,10 @@ app.get('/api/filesystem/folders', async (req, res) => {
 // Write exported mesh files (mesh + companions) into a user-chosen folder.
 // --- Python mesh-tools proxy (Auto UV / Auto Retopo) -------------------------
 // The browser uploads a mesh to one of these routes; Node forwards it to the
-// configurable Python service (Settings > Mesh Tools) and relays the JSON
-// envelope it returns ({ mesh_b64, stats, preview_b64 }). Mirrors how the
-// ComfyUI integration proxies external compute.
+// configurable Python service (Settings > Mesh Tools) and streams back its
+// Server-Sent Events (progress events + a terminal `done` event carrying the
+// mesh_b64/stats/preview_b64). Mirrors how the ComfyUI integration proxies
+// external compute.
 const meshToolsUpload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 512 * 1024 * 1024 },
@@ -5018,6 +5020,7 @@ async function proxyMeshTool(operationPath, req, res) {
   }
 
   if (!upstream.ok) {
+    // Pre-stream failures (bad options, mesh load) come back as JSON.
     const detail = await upstream.text().catch(() => '');
     return res.status(upstream.status).json({
       error: `Mesh tool failed (${upstream.status})`,
@@ -5025,10 +5028,19 @@ async function proxyMeshTool(operationPath, req, res) {
     });
   }
 
-  // Relay the JSON envelope verbatim (mesh_b64 + stats + preview_b64).
-  const body = await upstream.text();
-  res.setHeader('Content-Type', upstream.headers.get('content-type') || 'application/json');
-  return res.status(200).send(body);
+  // Stream the Server-Sent Events straight through to the browser.
+  res.status(200);
+  res.setHeader('Content-Type', upstream.headers.get('content-type') || 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache, no-transform');
+  res.setHeader('Connection', 'keep-alive');
+  res.setHeader('X-Accel-Buffering', 'no');
+  if (typeof res.flushHeaders === 'function') res.flushHeaders();
+
+  if (!upstream.body) {
+    res.end();
+    return undefined;
+  }
+  return Readable.fromWeb(upstream.body).pipe(res);
 }
 
 app.post('/api/meshes/auto-uv', meshToolsUpload.single('meshFile'), async (req, res) => {

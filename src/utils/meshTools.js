@@ -18,7 +18,52 @@ function base64ToBlob(base64, type) {
   return new Blob([bytes], { type })
 }
 
-async function callMeshTool(endpoint, meshBlob, { options = {}, fileName = 'mesh.glb', format = 'glb' } = {}) {
+// Parse the Server-Sent Events stream. Calls onProgress for each progress event
+// and resolves with the terminal "done" event payload. Throws on "error".
+async function readSseStream(response, onProgress) {
+  const reader = response.body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ''
+  let doneEvent = null
+
+  const handleEvent = raw => {
+    const dataLine = raw.split('\n').find(line => line.startsWith('data:'))
+    if (!dataLine) return
+    let evt
+    try {
+      evt = JSON.parse(dataLine.slice(5).trim())
+    } catch {
+      return
+    }
+    if (evt.type === 'progress') {
+      onProgress?.(evt)
+    } else if (evt.type === 'done') {
+      doneEvent = evt
+    } else if (evt.type === 'error') {
+      throw new Error(evt.detail || 'The mesh tool reported an error.')
+    }
+  }
+
+  for (;;) {
+    const { done, value } = await reader.read()
+    if (done) break
+    buffer += decoder.decode(value, { stream: true })
+    let sep
+    while ((sep = buffer.indexOf('\n\n')) >= 0) {
+      const raw = buffer.slice(0, sep)
+      buffer = buffer.slice(sep + 2)
+      handleEvent(raw)
+    }
+  }
+  if (buffer.trim()) handleEvent(buffer)
+
+  if (!doneEvent) {
+    throw new Error('The mesh tool finished without returning a result.')
+  }
+  return doneEvent
+}
+
+async function callMeshTool(endpoint, meshBlob, { options = {}, fileName = 'mesh.glb', format = 'glb', onProgress = null } = {}) {
   const form = new FormData()
   form.append('meshFile', meshBlob, fileName)
   form.append('options', JSON.stringify(options))
@@ -37,7 +82,7 @@ async function callMeshTool(endpoint, meshBlob, { options = {}, fileName = 'mesh
     throw new Error(message)
   }
 
-  const data = await response.json()
+  const data = await readSseStream(response, onProgress)
   const outFormat = data.format || 'glb'
   const mimeType = outFormat === 'glb' ? 'model/gltf-binary' : 'application/octet-stream'
   const blob = base64ToBlob(data.mesh_b64, mimeType)

@@ -5,26 +5,26 @@ Contract (shared by both routes):
                - meshFile : the mesh to process (GLB/OBJ/PLY/STL)
                - options  : JSON string of the operation options (optional)
                - format   : desired output format, default "glb" (optional)
-  Response : application/json
-               {
-                 "format": "glb",
-                 "mesh_b64": "<base64 of the processed mesh bytes>",
-                 "stats": { "vertex_count", "face_count", "has_uv", "tool": {...} },
-                 "preview_b64": "<base64 PNG>" | null   # UV layout for Auto UV
-               }
+  Response : text/event-stream (Server-Sent Events). Each event is a `data:` line
+             with a JSON object:
+               {"type":"progress","stage":"remesh","frac":0.58,"message":"…"}
+               {"type":"done","format":"glb","mesh_b64":"…","stats":{…},"preview_b64":…}
+               {"type":"error","detail":"…"}
 
-A JSON envelope (rather than a binary body + custom headers) is used because the
-browser cannot read custom response headers across origins, and it gives a clean
-channel for the UV-layout preview image. These meshes are low-poly, so the base64
-overhead is negligible.
+The heavy work runs in a worker thread; its progress callback pushes events onto
+a queue that the streaming generator drains. The final mesh is delivered base64
+in the terminal `done` event (these meshes are low-poly, so the overhead is
+negligible) along with stats and an optional preview image.
 """
 from __future__ import annotations
 
 import base64
 import json
+import queue
+import threading
 
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
-from fastapi.responses import JSONResponse
+from fastapi.responses import StreamingResponse
 from pydantic import ValidationError
 
 from ..config import MAX_UPLOAD_BYTES
@@ -34,6 +34,12 @@ from ..services.auto_retopo import run_auto_retopo
 from ..services.auto_uv import run_auto_uv
 
 router = APIRouter(prefix="/meshes", tags=["meshes"])
+
+_SSE_HEADERS = {
+    "Cache-Control": "no-cache, no-transform",
+    "X-Accel-Buffering": "no",  # disable proxy buffering (nginx etc.)
+    "Connection": "keep-alive",
+}
 
 
 def _parse_options(raw: str | None, model):
@@ -58,11 +64,11 @@ async def _read_upload(mesh_file: UploadFile) -> bytes:
     return data
 
 
-def _tool_response(mesh, fmt: str, tool_stats: dict | None = None, preview_png: bytes | None = None) -> JSONResponse:
+def _envelope(mesh, fmt: str, tool_stats: dict | None, preview_png: bytes | None) -> dict:
     fmt = (fmt or "glb").lstrip(".").lower()
     payload = export_mesh(mesh, fmt)
     stats = mesh_stats(mesh)
-    return JSONResponse({
+    return {
         "format": fmt,
         "mesh_b64": base64.b64encode(payload).decode("ascii"),
         "stats": {
@@ -72,7 +78,49 @@ def _tool_response(mesh, fmt: str, tool_stats: dict | None = None, preview_png: 
             "tool": tool_stats,
         },
         "preview_b64": base64.b64encode(preview_png).decode("ascii") if preview_png else None,
-    })
+    }
+
+
+def _sse(obj: dict) -> str:
+    return f"data: {json.dumps(obj, separators=(',', ':'))}\n\n"
+
+
+def _stream_tool(run_callable, fmt: str, label: str) -> StreamingResponse:
+    """Run `run_callable(emit)` in a worker thread and stream SSE progress events.
+
+    `run_callable(emit)` must return (mesh, tool_stats, preview_png) and may call
+    emit(stage, frac, message) to report progress.
+    """
+    events: "queue.Queue" = queue.Queue()
+    holder: dict = {}
+
+    def emit(stage, frac, message=""):
+        events.put({"type": "progress", "stage": stage, "frac": round(float(frac), 4), "message": message})
+
+    def worker():
+        try:
+            mesh, tool_stats, preview = run_callable(emit)
+            holder["payload"] = _envelope(mesh, fmt, tool_stats, preview)
+        except Exception as exc:  # noqa: BLE001 — surfaced to the client as an error event
+            holder["error"] = f"{label} failed: {exc}"
+        finally:
+            events.put(None)  # sentinel: worker finished
+
+    threading.Thread(target=worker, daemon=True).start()
+
+    def generate():
+        yield _sse({"type": "progress", "stage": "start", "frac": 0.0, "message": f"{label} starting…"})
+        while True:
+            item = events.get()
+            if item is None:
+                break
+            yield _sse(item)
+        if "error" in holder:
+            yield _sse({"type": "error", "detail": holder["error"]})
+        else:
+            yield _sse({"type": "done", **holder["payload"]})
+
+    return StreamingResponse(generate(), media_type="text/event-stream", headers=_SSE_HEADERS)
 
 
 @router.post("/auto-uv")
@@ -80,15 +128,11 @@ async def auto_uv(
     meshFile: UploadFile = File(...),
     options: str | None = Form(None),
     format: str = Form("glb"),
-) -> JSONResponse:
+) -> StreamingResponse:
     opts = _parse_options(options, AutoUvOptions)
     data = await _read_upload(meshFile)
     mesh = load_mesh(data, meshFile.filename or "mesh.glb")
-    try:
-        result, tool_stats, preview_png = run_auto_uv(mesh, opts)
-    except Exception as exc:  # noqa: BLE001 — surface tool errors as 500 with detail
-        raise HTTPException(status_code=500, detail=f"Auto UV failed: {exc}") from exc
-    return _tool_response(result, format, tool_stats, preview_png)
+    return _stream_tool(lambda emit: run_auto_uv(mesh, opts, progress=emit), format, "Auto UV")
 
 
 @router.post("/auto-retopo")
@@ -96,12 +140,8 @@ async def auto_retopo(
     meshFile: UploadFile = File(...),
     options: str | None = Form(None),
     format: str = Form("glb"),
-) -> JSONResponse:
+) -> StreamingResponse:
     opts = _parse_options(options, AutoRetopoOptions)
     data = await _read_upload(meshFile)
     mesh = load_mesh(data, meshFile.filename or "mesh.glb")
-    try:
-        result, tool_stats, preview_png = run_auto_retopo(mesh, opts)
-    except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=500, detail=f"Auto Retopo failed: {exc}") from exc
-    return _tool_response(result, format, tool_stats, preview_png)
+    return _stream_tool(lambda emit: run_auto_retopo(mesh, opts, progress=emit), format, "Auto Retopo")
