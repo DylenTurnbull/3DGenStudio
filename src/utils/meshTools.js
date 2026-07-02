@@ -107,3 +107,31 @@ export function autoUv(meshBlob, opts = {}) {
 export function autoRetopo(meshBlob, opts = {}) {
   return callMeshTool('/meshes/auto-retopo', meshBlob, opts)
 }
+
+// Runs the bundled gltfpack binary server-side (not the Python service). Unlike
+// the SSE-based tools above, this returns a single JSON envelope with the
+// simplified GLB as base64. Same { blob, stats, previewUrl } contract so it
+// plugs into runMeshTool alongside Auto UV / Auto Retopo.
+export async function optimizeMesh(meshBlob, { options = {}, fileName = 'mesh.glb', onProgress = null } = {}) {
+  const form = new FormData()
+  form.append('meshFile', meshBlob, fileName)
+  form.append('options', JSON.stringify(options))
+
+  onProgress?.({ type: 'progress', stage: 'run', frac: 0.3, message: 'Optimizing…' })
+
+  const response = await fetch(`${API_BASE}/meshes/optimize`, { method: 'POST', body: form })
+  if (!response.ok) {
+    let message = `Request failed (${response.status})`
+    try {
+      const payload = await response.json()
+      message = payload.error || message
+    } catch {
+      // non-JSON error body — keep the status message
+    }
+    throw new Error(message)
+  }
+
+  const data = await response.json()
+  const blob = base64ToBlob(data.mesh_b64, 'model/gltf-binary')
+  return { blob, stats: data.stats || null, previewUrl: null }
+}

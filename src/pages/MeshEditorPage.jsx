@@ -146,7 +146,8 @@ import { saveWorkflowDefaults } from '../utils/workflowDefaults'
 import PaintingToolsPanel from '../components/meshEditor/PaintingToolsPanel'
 import AutoUvToolsPanel from '../components/meshEditor/AutoUvToolsPanel'
 import AutoRetopoToolsPanel from '../components/meshEditor/AutoRetopoToolsPanel'
-import { autoUv as runAutoUvService, autoRetopo as runAutoRetopoService } from '../utils/meshTools'
+import OptimizeToolsPanel from '../components/meshEditor/OptimizeToolsPanel'
+import { autoUv as runAutoUvService, autoRetopo as runAutoRetopoService, optimizeMesh as runOptimizeService } from '../utils/meshTools'
 
 // Default option sets for the Python mesh-tools panels. These mirror the
 // defaults of autouv.unwrap() and autoretopo.RetopoConfig 1:1 (see
@@ -188,6 +189,10 @@ const DEFAULT_AUTO_RETOPO_OPTIONS = {
   project_clamp: 1.5,
   relax_strength: 0.4,
   seed: 0,
+}
+
+const DEFAULT_OPTIMIZE_OPTIONS = {
+  simplify_ratio: 0.5,
 }
 
 // ── Projection per-layer mask helpers ───────────────────────────────────────
@@ -403,6 +408,10 @@ export default function MeshEditorPage() {
   const [autoRetopoResult, setAutoRetopoResult] = useState(null)
   const [autoUvProgress, setAutoUvProgress] = useState(null)
   const [autoRetopoProgress, setAutoRetopoProgress] = useState(null)
+  const [optimizeOptions, setOptimizeOptions] = useState(DEFAULT_OPTIMIZE_OPTIONS)
+  const [optimizeRunning, setOptimizeRunning] = useState(false)
+  const [optimizeResult, setOptimizeResult] = useState(null)
+  const [optimizeProgress, setOptimizeProgress] = useState(null)
   const [booleanOperation, setBooleanOperation] = useState('out')
   const [booleanPlaceMode, setBooleanPlaceMode] = useState(false)
   const [booleanBrushSource, setBooleanBrushSource] = useState('asset')
@@ -1765,7 +1774,21 @@ export default function MeshEditorPage() {
     }
 
     targetMesh.geometry = geometry
-    targetMesh.updateMatrixWorld(true)
+    // The editable `geometry` already has the mesh's full world transform baked
+    // in (loadEditableGeometryFromObject applies child.matrixWorld). If the
+    // source node carries its own transform we must NOT apply it again — e.g.
+    // gltfpack / KHR_mesh_quantization stores the real scale in the node
+    // transform, so leaving it in place double-applies it and collapses the mesh
+    // to an invisible speck in the texture/paint/projection views (modeling mode
+    // renders the geometry directly, which is why it stayed visible there). Pin
+    // this node's world matrix to identity so the textured display and its
+    // raycasting match the editable geometry.
+    targetMesh.position.set(0, 0, 0)
+    targetMesh.quaternion.identity()
+    targetMesh.scale.set(1, 1, 1)
+    targetMesh.matrix.identity()
+    targetMesh.matrixWorldAutoUpdate = false
+    targetMesh.matrixWorld.identity()
     root.updateMatrixWorld(true)
   }, [geometry, geometryRevision, texturableMesh])
 
@@ -3757,8 +3780,8 @@ export default function MeshEditorPage() {
   // pre-op mesh onto the modeling undo stack, so "Revert" is just an undo.
   // After applying, the texturable-mesh state is rebuilt so the new UVs (Auto
   // UV) immediately enable painting/texturing/projection.
-  const runMeshTool = useCallback(async (service, options, { setRunning, setResult, setProgress, buildRows, label }) => {
-    if (!geometry || autoUvRunning || autoRetopoRunning) {
+  const runMeshTool = useCallback(async (service, options, { setRunning, setResult, setProgress, buildRows, label, preserveTexture = false }) => {
+    if (!geometry || autoUvRunning || autoRetopoRunning || optimizeRunning) {
       return
     }
     setRunning(true)
@@ -3778,13 +3801,36 @@ export default function MeshEditorPage() {
       const nextGeometry = await loadEditableGeometryFromGlbBuffer(resultBuffer)
       applyGeometryUpdate(nextGeometry, [], { pushUndo: true })
       // Resync texture editing to the new topology/UVs (enables the texture
-      // modes when the result carries UVs, disables them otherwise).
-      const nextTexturable = await buildTexturableFromGeometry(nextGeometry, blankTextureSize)
+      // modes when the result carries UVs, disables them otherwise). When the
+      // operation preserves the existing UV layout (Optimize/simplify only
+      // reduces triangles), carry the current texture over onto the new geometry
+      // instead of resetting to a blank canvas.
+      let nextTexturable
+      if (preserveTexture && texturableMesh?.textureCanvas) {
+        const preservedTexture = createCanvasTexture(texturableMesh.textureCanvas, texturableMesh.textureConfig)
+        const preservedRoot = new THREE.Mesh(
+          nextGeometry.clone(),
+          new THREE.MeshStandardMaterial({ map: preservedTexture, metalness: 0.08, roughness: 0.62 })
+        )
+        preservedRoot.name = 'MeshEditorResult'
+        const loaded = await loadTexturableMeshFromRoot(preservedRoot, { url: modelUrl, blankTextureSize })
+        nextTexturable = loaded?.textureCanvas
+          ? {
+            ...loaded,
+            maskCanvas: Object.assign(document.createElement('canvas'), {
+              width: loaded.textureCanvas.width,
+              height: loaded.textureCanvas.height,
+            }),
+          }
+          : loaded
+      } else {
+        nextTexturable = await buildTexturableFromGeometry(nextGeometry, blankTextureSize)
+      }
       setTexturableMesh(nextTexturable)
       setTextureRevision(0)
       setPaintLayers([])
       setSelectedLayerId(null)
-      setResult({ rows: buildRows(stats), previewUrl })
+      setResult({ rows: buildRows(stats, nextGeometry), previewUrl })
       setFeedback(`${label} complete.`)
     } catch (err) {
       console.error(`${label} failed:`, err)
@@ -3793,7 +3839,7 @@ export default function MeshEditorPage() {
       setRunning(false)
       setProgress(null)
     }
-  }, [geometry, autoUvRunning, autoRetopoRunning, applyGeometryUpdate, buildTexturableFromGeometry, blankTextureSize])
+  }, [geometry, autoUvRunning, autoRetopoRunning, optimizeRunning, applyGeometryUpdate, buildTexturableFromGeometry, blankTextureSize, texturableMesh, modelUrl])
 
   const handleRunAutoUv = useCallback(() => {
     runMeshTool(runAutoUvService, autoUvOptions, {
@@ -3835,11 +3881,30 @@ export default function MeshEditorPage() {
     })
   }, [runMeshTool, autoRetopoOptions])
 
+  const handleRunOptimize = useCallback(() => {
+    runMeshTool(runOptimizeService, optimizeOptions, {
+      setRunning: setOptimizeRunning,
+      setResult: setOptimizeResult,
+      setProgress: setOptimizeProgress,
+      label: 'Optimize',
+      preserveTexture: true,
+      buildRows: (stats, geo) => {
+        const rows = [{ label: 'Simplify ratio', value: optimizeOptions.simplify_ratio }]
+        if (geo?.index) rows.push({ label: 'Faces', value: geo.index.count / 3 })
+        if (geo?.attributes?.position) rows.push({ label: 'Vertices', value: geo.attributes.position.count })
+        return rows
+      },
+    })
+  }, [runMeshTool, optimizeOptions])
+
   const setAutoUvOption = useCallback((key, value) => {
     setAutoUvOptions(prev => ({ ...prev, [key]: value }))
   }, [])
   const setAutoRetopoOption = useCallback((key, value) => {
     setAutoRetopoOptions(prev => ({ ...prev, [key]: value }))
+  }, [])
+  const setOptimizeOption = useCallback((key, value) => {
+    setOptimizeOptions(prev => ({ ...prev, [key]: value }))
   }, [])
 
   const handleRevertMeshTool = useCallback((clearResult) => {
@@ -5862,6 +5927,15 @@ export default function MeshEditorPage() {
                     <span className="material-symbols-outlined">grid_4x4</span>
                     <span>Auto Retopo</span>
                   </button>
+                  <button
+                    type="button"
+                    className={`mesh-editor-mode-btn ${activeMenu === 'optimize' ? 'mesh-editor-mode-btn--active' : ''}`}
+                    onClick={() => setActiveMenu('optimize')}
+                    title="Simplify the mesh with gltfpack (meshoptimizer)"
+                  >
+                    <span className="material-symbols-outlined">compress</span>
+                    <span>Optimize</span>
+                  </button>
                 </div>
 
                 {texturableMesh?.isBlank && (
@@ -5950,6 +6024,15 @@ export default function MeshEditorPage() {
                     onRun: handleRunAutoRetopo,
                     onKeepResult: () => setAutoRetopoResult(null),
                     onRevertResult: () => handleRevertMeshTool(setAutoRetopoResult),
+                    disabled: !geometry
+                  }} />
+                ) : activeMenu === 'optimize' ? (
+                  <OptimizeToolsPanel {...{
+                    options: optimizeOptions, setOption: setOptimizeOption,
+                    running: optimizeRunning, result: optimizeResult, progress: optimizeProgress,
+                    onRun: handleRunOptimize,
+                    onKeepResult: () => setOptimizeResult(null),
+                    onRevertResult: () => handleRevertMeshTool(setOptimizeResult),
                     disabled: !geometry
                   }} />
                 ) : activeMenu === 'sculpting' ? (

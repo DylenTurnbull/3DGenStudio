@@ -5061,6 +5061,98 @@ app.post('/api/meshes/auto-retopo', meshToolsUpload.single('meshFile'), async (r
   }
 });
 
+// --- Mesh optimize (meshoptimizer / gltfpack binary) ------------------------
+// Unlike Auto UV / Auto Retopo (which proxy to the Python service), this runs
+// the bundled `gltfpack` binary locally. The browser uploads a GLB; we write it
+// to a temp file, run gltfpack to simplify it (-si <ratio>), then return the
+// simplified GLB as base64. `-noq` disables quantization so the output stays
+// plain-float and loads cleanly into the editable geometry pipeline.
+const MESHOPTIMIZER_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), 'tools', 'meshoptimizer');
+
+function resolveGltfpackPath() {
+  const platform = process.platform;
+  if (platform === 'win32') {
+    return path.join(MESHOPTIMIZER_DIR, 'win', 'gltfpack.exe');
+  }
+  if (platform === 'linux') {
+    return path.join(MESHOPTIMIZER_DIR, 'linux', 'gltfpack');
+  }
+  if (platform === 'darwin') {
+    const arch = process.arch === 'arm64' ? 'arm' : 'intel';
+    return path.join(MESHOPTIMIZER_DIR, 'macos', arch, 'gltfpack');
+  }
+  throw new Error(`Unsupported platform for gltfpack: ${platform}`);
+}
+
+app.post('/api/meshes/optimize', meshToolsUpload.single('meshFile'), async (req, res) => {
+  const tmpFiles = [];
+  try {
+    const meshFile = req.file;
+    if (!meshFile?.buffer?.length) {
+      return res.status(400).json({ error: 'meshFile is required' });
+    }
+
+    let options = {};
+    if (typeof req.body?.options === 'string' && req.body.options.length) {
+      try { options = JSON.parse(req.body.options); } catch { options = {}; }
+    }
+    let ratio = Number(options.simplify_ratio);
+    if (!Number.isFinite(ratio)) ratio = 1;
+    ratio = Math.min(1, Math.max(0.001, ratio));
+
+    const binaryPath = resolveGltfpackPath();
+    if (!existsSync(binaryPath)) {
+      return res.status(500).json({ error: `gltfpack binary not found at ${binaryPath}` });
+    }
+    // git-checked-out unix binaries may lack the execute bit.
+    if (process.platform !== 'win32') {
+      try { await fs.chmod(binaryPath, 0o755); } catch { /* best effort */ }
+    }
+
+    const id = randomUUID();
+    const inputPath = path.join(os.tmpdir(), `meshopt-${id}-in.glb`);
+    const outputPath = path.join(os.tmpdir(), `meshopt-${id}-out.glb`);
+    tmpFiles.push(inputPath, outputPath);
+    await fs.writeFile(inputPath, meshFile.buffer);
+
+    // -kv keeps source vertex attributes (UVs, normals) even when they look
+    // "unused" — the editor exports meshes with an untextured placeholder
+    // material, so without -kv gltfpack strips TEXCOORD_0 and the reloaded mesh
+    // loses its UVs (disabling the texture/paint/projection modes).
+    const args = ['-i', inputPath, '-o', outputPath, '-si', String(ratio), '-noq', '-kv'];
+    const stderr = await new Promise((resolve, reject) => {
+      const proc = spawn(binaryPath, args, { windowsHide: true });
+      let err = '';
+      proc.stderr.on('data', chunk => { err += chunk.toString(); });
+      proc.stdout.on('data', chunk => { err += chunk.toString(); });
+      proc.on('error', reject);
+      proc.on('close', code => {
+        if (code === 0) resolve(err);
+        else reject(new Error(err.trim() || `gltfpack exited with code ${code}`));
+      });
+    });
+
+    const outBuffer = await fs.readFile(outputPath);
+
+    // Best-effort: pull the output triangle count from gltfpack's report.
+    let triangles = null;
+    const triMatch = [...stderr.matchAll(/([\d,]+)\s+triangles/gi)];
+    if (triMatch.length) {
+      triangles = Number(triMatch[triMatch.length - 1][1].replace(/,/g, ''));
+    }
+
+    res.json({
+      mesh_b64: outBuffer.toString('base64'),
+      stats: { simplify_ratio: ratio, triangles: Number.isFinite(triangles) ? triangles : null },
+    });
+  } catch (err) {
+    console.error('Mesh optimize failed:', err);
+    if (!res.headersSent) res.status(500).json({ error: err.message || 'Mesh optimize failed' });
+  } finally {
+    await Promise.all(tmpFiles.map(f => fs.rm(f, { force: true }).catch(() => {})));
+  }
+});
+
 app.post('/api/export/mesh', multer({ storage: multer.memoryStorage(), limits: { fileSize: 512 * 1024 * 1024 } }).array('files'), async (req, res) => {
   try {
     const folder = typeof req.body?.folder === 'string' ? req.body.folder.trim() : '';

@@ -223,6 +223,43 @@ function loadWithLoader(loader, url) {
   })
 }
 
+// Rebuild an attribute as a plain, de-interleaved, non-normalized Float32 array.
+// Reading via getX/…/getW denormalizes normalized integer attributes and resolves
+// interleaved buffers, so the resulting attribute holds real float values.
+function toFloat32Attribute(attribute) {
+  const { itemSize, count } = attribute
+  const array = new Float32Array(count * itemSize)
+  const getters = ['getX', 'getY', 'getZ', 'getW']
+  for (let i = 0; i < count; i += 1) {
+    for (let component = 0; component < itemSize; component += 1) {
+      array[i * itemSize + component] = attribute[getters[component]](i)
+    }
+  }
+  return new THREE.BufferAttribute(array, itemSize)
+}
+
+// gltfpack (and other exporters) store vertex data with KHR_mesh_quantization:
+// attributes become normalized integers whose real scale lives in the node
+// transform, and are often interleaved. THREE renders these correctly, but
+// reading the raw typed array or calling applyMatrix4 on a still-`normalized`
+// integer attribute corrupts the geometry — applyMatrix4 writes float world
+// coordinates back into the int array while the normalized flag stays set,
+// collapsing the whole mesh to a speck (it then loads without error but is
+// invisible in the editor). Convert everything we read to plain Float32 first.
+function dequantizeGeometryAttributes(geometry) {
+  const names = ['position', 'normal', 'tangent', 'uv', 'uv1', 'uv2', 'color']
+  names.forEach(name => {
+    const attribute = geometry.attributes[name]
+    if (!attribute) {
+      return
+    }
+    if (attribute.isInterleavedBufferAttribute || attribute.normalized || !(attribute.array instanceof Float32Array)) {
+      geometry.setAttribute(name, toFloat32Attribute(attribute))
+    }
+  })
+  return geometry
+}
+
 function createMergedGeometryFromObject(object) {
   const root = object?.scene || object
 
@@ -239,6 +276,7 @@ function createMergedGeometryFromObject(object) {
     }
 
     const geometry = child.geometry.clone()
+    dequantizeGeometryAttributes(geometry)
     geometry.applyMatrix4(child.matrixWorld)
     geometries.push(geometry.index ? geometry.toNonIndexed() : geometry)
   })
