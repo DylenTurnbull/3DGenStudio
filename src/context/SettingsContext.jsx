@@ -78,6 +78,10 @@ export function SettingsProvider({ children }) {
             openai_gpt_image_1_5: {
               name: 'gpt-image-1.5',
               model: 'gpt-image-1.5'
+            },
+            openai_gpt_image_2: {
+              name: 'gpt-image-2',
+              model: 'gpt-image-2'
             }
           },
           responseMapping: {
@@ -104,6 +108,10 @@ export function SettingsProvider({ children }) {
             openai_gpt_image_1_5: {
               name: 'gpt-image-1.5',
               model: 'gpt-image-1.5'
+            },
+            openai_gpt_image_2: {
+              name: 'gpt-image-2',
+              model: 'gpt-image-2'
             }
           },
           responseMapping: {
