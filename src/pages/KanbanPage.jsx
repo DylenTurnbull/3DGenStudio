@@ -538,6 +538,7 @@ export default function KanbanPage() {
         await runComfyWorkflow(projectId, {
           workflowId: draft.workflowId,
           inputs: draft.inputs || {},
+          name: String(draft.name || '').trim() || undefined,
           cardId,
           clientId: comfyClientId,
           promptId
@@ -570,10 +571,16 @@ export default function KanbanPage() {
 
     if (!draft?.prompt?.trim()) return
 
+    const trimmedImageName = String(draft.name || '').trim()
+    if (!trimmedImageName) {
+      showStatusMessage('Enter a name for the generated image.', 'error')
+      return
+    }
+
     try {
       setPendingImageGeneration({
         selectedApi: draft.selectedApi,
-        title: draft.prompt.trim(),
+        title: trimmedImageName,
         source: imageGenerationApis.find(api => api.id === draft.selectedApi)?.name || 'Remote API',
         detail: 'Waiting for image response'
       })
@@ -582,6 +589,7 @@ export default function KanbanPage() {
       await generateImage(projectId, {
         selectedApi: draft.selectedApi,
         prompt: draft.prompt,
+        name: trimmedImageName,
         cardId: draft.cardId || createImageCardId()
       })
       await refreshProjectAssets()
@@ -2902,6 +2910,18 @@ export default function KanbanPage() {
                         <span>{selectedComfyWorkflow?.outputs?.length || 0} outputs selected</span>
                       </div>
 
+                      <div className="params-card__field">
+                        <label className="params-card__label font-label">NAME</label>
+                        <input
+                          type="text"
+                          className="params-card__input"
+                          value={imageDraft.name ?? ''}
+                          placeholder={selectedComfyWorkflow?.name || 'Generated image name'}
+                          onChange={e => setImageDraft(prev => ({ ...prev, name: e.target.value }))}
+                        />
+                        <span className="image-card__param-hint">Used to name the saved image in the Assets</span>
+                      </div>
+
                       <div className="gen-section">
                         {(selectedComfyWorkflow?.parameters || []).length > 0 ? (
                           <div className="image-card__workflow-params">
@@ -3011,6 +3031,18 @@ export default function KanbanPage() {
                       <option key={api.id} value={api.id}>{api.name}</option>
                     ))}
                   </select>
+
+                  <div className="params-card__field">
+                    <label className="params-card__label font-label">NAME</label>
+                    <input
+                      type="text"
+                      className="params-card__input"
+                      value={imageDraft.name ?? ''}
+                      placeholder="Generated image name"
+                      onChange={e => setImageDraft(prev => ({ ...prev, name: e.target.value }))}
+                    />
+                    <span className="image-card__param-hint">Used to name the saved image in the Assets</span>
+                  </div>
 
                   <div className="gen-section">
                     <div className="comfy-textfield-wrap">
