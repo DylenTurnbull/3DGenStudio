@@ -1408,6 +1408,55 @@ export async function getProjectAssetById(projectId, assetId) {
   return asset;
 }
 
+// Fall back to resolving an edit/version by its own file when its parent root
+// isn't a Kanban card asset in the requested project. The node-graph asset
+// library is global, so an Image/Mesh node can legitimately reference an edit
+// whose root lives in another project (or was imported straight into the
+// library and has no card at all). The primary card-scoped lookup runs first;
+// this only fires when that finds nothing, so it never alters resolution for
+// edits whose root IS a card asset in the project.
+async function resolveEditSourceByFilePath(db, editFilePath, typeName) {
+  const editRow = await get(
+    db,
+    `SELECT child.id AS childId, child.parentId, child.name AS editName,
+            child.filePath AS editFilePath, child.width AS editWidth,
+            child.height AS editHeight, child.metadata AS editMetadata
+     FROM Assets child
+     JOIN AssetTypes childType ON childType.id = child.assetTypeId
+     WHERE child.filePath = ? AND childType.name = ?
+     ORDER BY child.creationDate DESC, child.id DESC
+     LIMIT 1`,
+    [editFilePath, typeName]
+  );
+
+  if (!editRow) {
+    return null;
+  }
+
+  const rootAsset = await getRootAssetById(editRow.parentId || editRow.childId);
+  const assetView = rootAsset ? await getAssetViewById(rootAsset.id) : null;
+  const editMetadata = parseJson(editRow.editMetadata, {});
+  const expectedType = typeName.toLowerCase();
+
+  return {
+    asset: assetView && assetView.type === expectedType
+      ? assetView
+      : {
+        id: rootAsset?.id ?? editRow.parentId ?? editRow.childId,
+        type: expectedType,
+        name: rootAsset?.name || editRow.editName || '',
+        filePath: rootAsset?.filePath || editRow.editFilePath
+      },
+    inputFilePath: editRow.editFilePath,
+    inputFilename: toAssetUrlPath(editRow.editFilePath),
+    inputName: editRow.editName || `${expectedType === 'mesh' ? 'Version' : 'Edit'} ${editMetadata?.editId || editRow.childId}`,
+    width: editRow.editWidth ?? 0,
+    height: editRow.editHeight ?? 0,
+    isEdit: true,
+    editId: editMetadata?.editId || null
+  };
+}
+
 export async function resolveProjectImageSource(projectId, sourceReference) {
   const parsedReference = typeof sourceReference === 'string'
     ? sourceReference
@@ -1436,12 +1485,12 @@ export async function resolveProjectImageSource(projectId, sourceReference) {
     );
 
     if (!row) {
-      return null;
+      return await resolveEditSourceByFilePath(db, editFilePath, 'Image');
     }
 
     const asset = await getProjectAssetById(projectId, row.assetId);
     if (!asset) {
-      return null;
+      return await resolveEditSourceByFilePath(db, editFilePath, 'Image');
     }
 
     const editMetadata = parseJson(row.editMetadata, {});
@@ -1509,12 +1558,12 @@ export async function resolveProjectMeshSource(projectId, sourceReference) {
     );
 
     if (!row) {
-      return null;
+      return await resolveEditSourceByFilePath(db, editFilePath, 'Mesh');
     }
 
     const asset = await getProjectAssetById(projectId, row.assetId);
     if (!asset) {
-      return null;
+      return await resolveEditSourceByFilePath(db, editFilePath, 'Mesh');
     }
 
     const editMetadata = parseJson(row.editMetadata, {});
