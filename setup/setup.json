@@ -615,7 +615,7 @@
 			"Name": "Refine Mesh with Trellis2",
 			"File": "setup/Refine Mesh with Trellis2.json",
 			"Inputs": [
-				{ "Node": "3", "Input": "glb_path",  "Name": "Source Image", "Type": "Mesh" },
+				{ "Node": "3", "Input": "glb_path",  "Name": "Source Mesh", "Type": "Mesh" },
 				{ "Node": "2", "Input": "image",  "Name": "Source Image", "Type": "Image" },
 				{ "Node": "28",  "Input": "value",  "Name": "Target Face Number",   "Type": "Number" },
 				{ "Node": "4",  "Input": "seed",  "Name": "Seed",   "Type": "Number" },
@@ -624,6 +624,19 @@
 			"Outputs": [
 				{ "Node": "7", "Name": "Save Mesh", "Type": "Mesh" }
 			]
-		}
+		},
+		{
+			"Name": "HighPoly to LowPoly Texturing with Trellis2",
+			"File": "setup/HighPoly to LowPoly Texturing with Trellis2.json",
+			"Inputs": [
+				{ "Node": "1", "Input": "glb_path",  "Name": "HighPoly Mesh", "Type": "Mesh" },
+				{ "Node": "2", "Input": "glb_path",  "Name": "LowPoly Mesh", "Type": "Mesh" },
+				{ "Node": "3", "Input": "render_size",  "Name": "View Size", "Type": "Number" },
+				{ "Node": "5",  "Input": "texture_size",  "Name": "Texture Size",   "Type": "Number" }
+			],
+			"Outputs": [
+				{ "Node": "7", "Name": "Save Mesh", "Type": "Mesh" }
+			]
+		}		
 	]
 }
