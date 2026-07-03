@@ -262,6 +262,12 @@ function openDatabase(filename) {
   });
 }
 
+function closeDatabase(db) {
+  return new Promise((resolve, reject) => {
+    db.close(err => (err ? reject(err) : resolve()));
+  });
+}
+
 async function tableExists(db, tableName) {
   const row = await get(
     db,
@@ -629,7 +635,7 @@ async function seedReferenceTables(db) {
   for (const column of KANBAN_COLUMNS) {
     await run(
       db,
-      `INSERT INTO KanbanColumns (id, name, position)
+      `INSERT INTO Columns (id, name, position)
        VALUES (?, ?, ?)
        ON CONFLICT(id) DO UPDATE SET name = excluded.name, position = excluded.position`,
       [column.id, column.name, column.position]
@@ -690,6 +696,184 @@ async function migrateGraphNodeTypes(db) {
   }
 }
 
+// Copy data/app.db to a timestamped .bak before the one-time Nodes→Cards
+// migration runs, so the pre-unification state is always recoverable. No-op for
+// a fresh install or an already-migrated DB (no legacy `Nodes` table).
+async function backupLegacyDbIfNeeded() {
+  try {
+    await fs.access(DB_FILE);
+  } catch {
+    return; // fresh install, nothing to back up
+  }
+
+  const probe = await openDatabase(DB_FILE);
+  let isLegacy = false;
+  try {
+    isLegacy = await tableExists(probe, 'Nodes');
+  } finally {
+    await closeDatabase(probe).catch(() => {});
+  }
+  if (!isLegacy) return;
+
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+  const backupPath = `${DB_FILE}.bak-${stamp}`;
+  await fs.copyFile(DB_FILE, backupPath);
+  console.log(`📦 Backed up pre-migration database to ${backupPath}`);
+}
+
+// One-time migration: fold the legacy Graph tables (Nodes, Connections,
+// KanbanColumns) into the unified Cards model. Runs inside a transaction and is
+// a no-op once the legacy `Nodes` table is gone. Every graph node becomes a
+// Card (nodeTypeId + coordinates), its asset moves to Cards_Assets, connections
+// are rebuilt against card ids, and the now-redundant backing "Images" cards
+// are pruned.
+async function migrateNodesIntoCards(db) {
+  if (!(await tableExists(db, 'Nodes'))) {
+    return; // already migrated (or fresh DB)
+  }
+
+  await exec(db, 'PRAGMA foreign_keys = OFF');
+  // Prevent SQLite (>=3.25) from auto-rewriting FK references in other tables
+  // when we RENAME during the rebuild (e.g. Cards_Assets → Cards_old).
+  await exec(db, 'PRAGMA legacy_alter_table = ON');
+  await exec(db, 'BEGIN');
+  try {
+    // 1. Rename KanbanColumns -> Columns (rows/ids preserved).
+    if (await tableExists(db, 'KanbanColumns') && !(await tableExists(db, 'Columns'))) {
+      await run(db, 'ALTER TABLE KanbanColumns RENAME TO Columns');
+    }
+
+    // 2. Rebuild Cards with the unified schema (nullable kanbanColumnId/position,
+    //    new nodeTypeId/xPos/yPos), preserving ids so Cards_Assets/Cards_Attributes
+    //    keep pointing at the right rows.
+    await run(db, 'ALTER TABLE Cards RENAME TO Cards_old');
+    await exec(
+      db,
+      `CREATE TABLE Cards (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        projectId INTEGER NOT NULL,
+        kanbanColumnId INTEGER,
+        nodeTypeId INTEGER,
+        clientKey TEXT,
+        name TEXT,
+        position INTEGER,
+        xPos REAL NOT NULL DEFAULT 0,
+        yPos REAL NOT NULL DEFAULT 0,
+        creationDate INTEGER NOT NULL,
+        status TEXT,
+        progress INTEGER,
+        metadata TEXT,
+        FOREIGN KEY(projectId) REFERENCES Projects(id) ON DELETE CASCADE,
+        FOREIGN KEY(kanbanColumnId) REFERENCES Columns(id),
+        FOREIGN KEY(nodeTypeId) REFERENCES NodeTypes(id),
+        UNIQUE(projectId, kanbanColumnId, position),
+        UNIQUE(projectId, clientKey)
+      )`
+    );
+    await run(
+      db,
+      `INSERT INTO Cards (id, projectId, kanbanColumnId, nodeTypeId, clientKey, name, position, xPos, yPos, creationDate, status, progress, metadata)
+       SELECT id, projectId, kanbanColumnId, NULL, clientKey, name, position, 0, 0, creationDate, status, progress, metadata
+       FROM Cards_old`
+    );
+    await run(db, 'DROP TABLE Cards_old');
+
+    // 3. Nodes -> Cards (node-cards). Map old node id -> new card id, and move
+    //    each node's asset into Cards_Assets.
+    const nodes = await all(db, 'SELECT * FROM Nodes ORDER BY id ASC');
+    const nodeToCard = new Map();
+    for (const node of nodes) {
+      const result = await run(
+        db,
+        `INSERT INTO Cards (projectId, kanbanColumnId, nodeTypeId, clientKey, name, position, xPos, yPos, creationDate, status, progress, metadata)
+         VALUES (?, NULL, ?, NULL, ?, NULL, ?, ?, ?, ?, ?, ?)`,
+        [node.projectId, node.nodeTypeId, node.name, node.xPos, node.yPos, node.creationDate, node.status, node.progress, node.metadata]
+      );
+      const newCardId = result.lastID;
+      nodeToCard.set(node.id, newCardId);
+      if (node.assetId != null) {
+        await run(db, 'INSERT OR IGNORE INTO Cards_Assets (cardId, assetId, position) VALUES (?, ?, 0)', [newCardId, node.assetId]);
+      }
+    }
+
+    // 4. Reconcile backing cards: for graph projects, the pre-existing cards were
+    //    only there to associate node assets with the project. Drop each backing
+    //    Cards_Assets link whose asset is now owned by a node-card, then remove
+    //    any backing card left empty. Backing cards whose asset is NOT covered by
+    //    a node-card are kept (an off-canvas asset with no node).
+    const graphProjects = await all(db, "SELECT id FROM Projects WHERE lower(preset) = 'graph'");
+    for (const project of graphProjects) {
+      // asset ids now owned by node-cards in this project
+      const nodeCardAssets = await all(
+        db,
+        `SELECT DISTINCT ca.assetId AS assetId
+         FROM Cards_Assets ca JOIN Cards c ON c.id = ca.cardId
+         WHERE c.projectId = ? AND c.nodeTypeId IS NOT NULL`,
+        [project.id]
+      );
+      const ownedAssetIds = new Set(nodeCardAssets.map(r => r.assetId));
+
+      // backing cards = this project's cards that are NOT node-cards
+      const backingCards = await all(
+        db,
+        'SELECT id FROM Cards WHERE projectId = ? AND nodeTypeId IS NULL',
+        [project.id]
+      );
+      for (const card of backingCards) {
+        const links = await all(db, 'SELECT assetId FROM Cards_Assets WHERE cardId = ?', [card.id]);
+        for (const link of links) {
+          if (ownedAssetIds.has(link.assetId)) {
+            await run(db, 'DELETE FROM Cards_Assets WHERE cardId = ? AND assetId = ?', [card.id, link.assetId]);
+          }
+        }
+        const remaining = await get(db, 'SELECT COUNT(*) AS n FROM Cards_Assets WHERE cardId = ?', [card.id]);
+        if (!remaining || remaining.n === 0) {
+          await run(db, 'DELETE FROM Cards WHERE id = ?', [card.id]);
+        }
+      }
+    }
+
+    // 5. Rebuild Connections against card ids.
+    const oldConnections = await all(db, 'SELECT * FROM Connections');
+    await run(db, 'ALTER TABLE Connections RENAME TO Connections_old');
+    await exec(
+      db,
+      `CREATE TABLE Connections (
+        sourceCardId INTEGER NOT NULL,
+        targetCardId INTEGER NOT NULL,
+        inputId TEXT NOT NULL,
+        outputId TEXT NOT NULL,
+        PRIMARY KEY(sourceCardId, targetCardId, inputId, outputId),
+        FOREIGN KEY(sourceCardId) REFERENCES Cards(id) ON DELETE CASCADE,
+        FOREIGN KEY(targetCardId) REFERENCES Cards(id) ON DELETE CASCADE
+      )`
+    );
+    for (const conn of oldConnections) {
+      const sourceCardId = nodeToCard.get(conn.sourceNodeId);
+      const targetCardId = nodeToCard.get(conn.targetNodeId);
+      if (sourceCardId == null || targetCardId == null) continue;
+      await run(
+        db,
+        'INSERT OR IGNORE INTO Connections (sourceCardId, targetCardId, inputId, outputId) VALUES (?, ?, ?, ?)',
+        [sourceCardId, targetCardId, conn.inputId, conn.outputId]
+      );
+    }
+    await run(db, 'DROP TABLE Connections_old');
+
+    // 6. Drop the legacy Nodes table. NodeTypes stays (Cards.nodeTypeId → it).
+    await run(db, 'DROP TABLE Nodes');
+
+    await exec(db, 'COMMIT');
+    console.log(`✅ Migrated ${nodes.length} graph node(s) into the unified Cards schema`);
+  } catch (err) {
+    await exec(db, 'ROLLBACK').catch(() => {});
+    throw err;
+  } finally {
+    await exec(db, 'PRAGMA legacy_alter_table = OFF').catch(() => {});
+    await exec(db, 'PRAGMA foreign_keys = ON').catch(() => {});
+  }
+}
+
 export async function initializeStorage() {
   await fs.mkdir(DATA_DIR, { recursive: true });
   await fs.mkdir(ASSETS_DIR, { recursive: true });
@@ -701,8 +885,18 @@ export async function initializeStorage() {
   await fs.mkdir(PAINT_DOCS_DIR, { recursive: true });
   await fs.mkdir(WIKI_ASSETS_DIR, { recursive: true });
 
+  // Back up the DB before the one-time Nodes→Cards migration touches it.
+  await backupLegacyDbIfNeeded();
+
   const db = await openDatabase(DB_FILE);
   await exec(db, 'PRAGMA foreign_keys = ON');
+
+  // Migrate the legacy split schema (Nodes/Connections/KanbanColumns) into the
+  // unified Cards model BEFORE the CREATE TABLE IF NOT EXISTS block, so the
+  // new-schema statements don't create empty tables alongside the legacy ones
+  // (e.g. a fresh Columns table beside the still-named KanbanColumns).
+  await migrateNodesIntoCards(db);
+
   await exec(
     db,
     `
@@ -715,25 +909,35 @@ export async function initializeStorage() {
       status TEXT NOT NULL DEFAULT 'active'
     );
 
-    CREATE TABLE IF NOT EXISTS KanbanColumns (
+    CREATE TABLE IF NOT EXISTS Columns (
       id INTEGER PRIMARY KEY,
       name TEXT NOT NULL UNIQUE,
       position INTEGER NOT NULL UNIQUE
     );
 
+    -- Cards is the unified representation for both Kanban cards and Graph nodes.
+    -- A card is a Graph node iff nodeTypeId IS NOT NULL (then it carries xPos/yPos
+    -- and Connections reference it). A Kanban card has kanbanColumnId + position
+    -- and leaves nodeTypeId NULL. kanbanColumnId/position are nullable so graph
+    -- node-cards need neither; SQLite treats NULLs as distinct in UNIQUE, so
+    -- graph node-cards never collide on (projectId, kanbanColumnId, position).
     CREATE TABLE IF NOT EXISTS Cards (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       projectId INTEGER NOT NULL,
-      kanbanColumnId INTEGER NOT NULL,
+      kanbanColumnId INTEGER,
+      nodeTypeId INTEGER,
       clientKey TEXT,
       name TEXT,
-      position INTEGER NOT NULL,
+      position INTEGER,
+      xPos REAL NOT NULL DEFAULT 0,
+      yPos REAL NOT NULL DEFAULT 0,
       creationDate INTEGER NOT NULL,
       status TEXT,
       progress INTEGER,
       metadata TEXT,
       FOREIGN KEY(projectId) REFERENCES Projects(id) ON DELETE CASCADE,
-      FOREIGN KEY(kanbanColumnId) REFERENCES KanbanColumns(id),
+      FOREIGN KEY(kanbanColumnId) REFERENCES Columns(id),
+      FOREIGN KEY(nodeTypeId) REFERENCES NodeTypes(id),
       UNIQUE(projectId, kanbanColumnId, position),
       UNIQUE(projectId, clientKey)
     );
@@ -801,31 +1005,16 @@ export async function initializeStorage() {
       name TEXT NOT NULL UNIQUE
     );
 
-    CREATE TABLE IF NOT EXISTS Nodes (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      projectId INTEGER NOT NULL,
-      nodeTypeId INTEGER NOT NULL,
-      name TEXT,
-      xPos REAL NOT NULL DEFAULT 0,
-      yPos REAL NOT NULL DEFAULT 0,
-      assetId INTEGER,
-      creationDate INTEGER NOT NULL,
-      status TEXT,
-      progress INTEGER,
-      metadata TEXT,
-      FOREIGN KEY(projectId) REFERENCES Projects(id) ON DELETE CASCADE,
-      FOREIGN KEY(nodeTypeId) REFERENCES NodeTypes(id),
-      FOREIGN KEY(assetId) REFERENCES Assets(id) ON DELETE SET NULL
-    );
-
+    -- Graph edges. Both endpoints are Cards (node-cards). inputId/outputId are
+    -- the React Flow handle ids on the target/source card respectively.
     CREATE TABLE IF NOT EXISTS Connections (
-      sourceNodeId INTEGER NOT NULL,
-      targetNodeId INTEGER NOT NULL,
+      sourceCardId INTEGER NOT NULL,
+      targetCardId INTEGER NOT NULL,
       inputId TEXT NOT NULL,
       outputId TEXT NOT NULL,
-      PRIMARY KEY(sourceNodeId, targetNodeId, inputId, outputId),
-      FOREIGN KEY(sourceNodeId) REFERENCES Nodes(id) ON DELETE CASCADE,
-      FOREIGN KEY(targetNodeId) REFERENCES Nodes(id) ON DELETE CASCADE
+      PRIMARY KEY(sourceCardId, targetCardId, inputId, outputId),
+      FOREIGN KEY(sourceCardId) REFERENCES Cards(id) ON DELETE CASCADE,
+      FOREIGN KEY(targetCardId) REFERENCES Cards(id) ON DELETE CASCADE
     );
 
     CREATE TABLE IF NOT EXISTS PaintDocuments (
@@ -870,9 +1059,9 @@ export async function initializeStorage() {
   }
 
   await run(db, 'CREATE INDEX IF NOT EXISTS idx_assets_parentId ON Assets(parentId)');
-  await run(db, 'CREATE INDEX IF NOT EXISTS idx_nodes_projectId ON Nodes(projectId)');
-  await run(db, 'CREATE INDEX IF NOT EXISTS idx_connections_sourceNodeId ON Connections(sourceNodeId)');
-  await run(db, 'CREATE INDEX IF NOT EXISTS idx_connections_targetNodeId ON Connections(targetNodeId)');
+  await run(db, 'CREATE INDEX IF NOT EXISTS idx_cards_projectId ON Cards(projectId)');
+  await run(db, 'CREATE INDEX IF NOT EXISTS idx_connections_sourceCardId ON Connections(sourceCardId)');
+  await run(db, 'CREATE INDEX IF NOT EXISTS idx_connections_targetCardId ON Connections(targetCardId)');
 
   await migrateLegacyAssetEditsToAssets(db);
 
@@ -949,7 +1138,7 @@ export function toAbsoluteStoragePath(filePath) {
 
 async function getKanbanColumnIdByName(name) {
   const db = await getDb();
-  const row = await get(db, 'SELECT id FROM KanbanColumns WHERE name = ?', [name]);
+  const row = await get(db, 'SELECT id FROM Columns WHERE name = ?', [name]);
   if (!row) {
     throw new Error(`Unknown Kanban column: ${name}`);
   }
@@ -1003,9 +1192,14 @@ async function ensureProjectNode(projectId, nodeId) {
   }
 
   const db = await getDb();
+  // A graph node is a Card with a nodeTypeId. Its (single) asset lives in
+  // Cards_Assets rather than a column on the row.
   const node = await get(
     db,
-    'SELECT id, projectId, nodeTypeId, assetId FROM Nodes WHERE id = ? AND projectId = ?',
+    `SELECT c.id, c.projectId, c.nodeTypeId,
+            (SELECT ca.assetId FROM Cards_Assets ca WHERE ca.cardId = c.id ORDER BY ca.position ASC LIMIT 1) AS assetId
+     FROM Cards c
+     WHERE c.id = ? AND c.projectId = ? AND c.nodeTypeId IS NOT NULL`,
     [normalizedNodeId, normalizedProjectId]
   );
 
@@ -1152,7 +1346,7 @@ async function getCardRow(projectId, externalCardId) {
     db,
     `SELECT c.*, kc.name AS kanbanColumnName
      FROM Cards c
-     JOIN KanbanColumns kc ON kc.id = c.kanbanColumnId
+     JOIN Columns kc ON kc.id = c.kanbanColumnId
      WHERE c.id = ? AND c.projectId = ?`,
     [card.id, projectId]
   );
@@ -1286,7 +1480,7 @@ async function getAssetViewById(assetId) {
      JOIN AssetTypes at ON at.id = a.assetTypeId
      LEFT JOIN Cards_Assets ca ON ca.assetId = a.id
      LEFT JOIN Cards c ON c.id = ca.cardId
-      LEFT JOIN KanbanColumns kc ON kc.id = c.kanbanColumnId
+      LEFT JOIN Columns kc ON kc.id = c.kanbanColumnId
      WHERE a.id = ?
      ORDER BY ca.position ASC
      LIMIT 1`,
@@ -1663,17 +1857,11 @@ export async function deleteProjectById(projectId, { deleteAssets = false } = {}
   if (deleteAssets) {
     const projectAssetRows = await all(
       db,
-      `SELECT assetId FROM (
-         SELECT ca.assetId AS assetId
-         FROM Cards_Assets ca
-         JOIN Cards c ON c.id = ca.cardId
-         WHERE c.projectId = ?
-         UNION
-         SELECT n.assetId AS assetId
-         FROM Nodes n
-         WHERE n.projectId = ? AND n.assetId IS NOT NULL
-       )`,
-      [projectId, projectId]
+      `SELECT DISTINCT ca.assetId AS assetId
+       FROM Cards_Assets ca
+       JOIN Cards c ON c.id = ca.cardId
+       WHERE c.projectId = ?`,
+      [projectId]
     );
     const directIds = projectAssetRows.map(row => row.assetId);
 
@@ -1703,8 +1891,7 @@ export async function deleteProjectById(projectId, { deleteAssets = false } = {}
        AND a.assetTypeId NOT IN (
              SELECT id FROM AssetTypes WHERE name IN ('Workflow', 'Brush')
            )
-       AND NOT EXISTS (SELECT 1 FROM Cards_Assets WHERE Cards_Assets.assetId = a.id)
-       AND NOT EXISTS (SELECT 1 FROM Nodes WHERE Nodes.assetId = a.id)`,
+       AND NOT EXISTS (SELECT 1 FROM Cards_Assets WHERE Cards_Assets.assetId = a.id)`,
     candidateAssetIds
   );
 
@@ -1762,7 +1949,7 @@ export async function listProjectTasks(projectId) {
     db,
     `SELECT c.*
      FROM Cards c
-     JOIN KanbanColumns kc ON kc.id = c.kanbanColumnId
+     JOIN Columns kc ON kc.id = c.kanbanColumnId
      WHERE c.projectId = ? AND kc.name = 'Mesh Gen'
      ORDER BY c.position ASC`,
     [projectId]
@@ -1777,7 +1964,7 @@ export async function listProjectCards(projectId) {
     db,
     `SELECT c.*, kc.name AS kanbanColumnName
      FROM Cards c
-     JOIN KanbanColumns kc ON kc.id = c.kanbanColumnId
+     JOIN Columns kc ON kc.id = c.kanbanColumnId
      WHERE c.projectId = ?
      ORDER BY c.kanbanColumnId ASC, c.position ASC, c.creationDate ASC, c.id ASC`,
     [projectId]
@@ -1786,22 +1973,68 @@ export async function listProjectCards(projectId) {
   return rows.map(mapProjectCardRow);
 }
 
+// Shared SELECT for a node-card (a Card with nodeTypeId set). Its single asset
+// is resolved through Cards_Assets and aliased so mapGraphNodeRow keeps working
+// unchanged (it reads row.assetId, row.assetName, …).
+const NODE_CARD_SELECT = `
+  SELECT c.id, c.projectId, c.nodeTypeId, c.name, c.xPos, c.yPos,
+         c.status, c.progress, c.metadata, c.creationDate,
+         nt.name AS nodeTypeName,
+         a.id AS assetId, a.name AS assetName, a.filePath AS assetFilePath, a.thumbnail AS assetThumbnail,
+         a.width AS assetWidth, a.height AS assetHeight, a.creationDate AS assetCreationDate,
+         a.parentId AS assetParentId, a.metadata AS assetMetadata,
+         at.name AS assetTypeName
+  FROM Cards c
+  JOIN NodeTypes nt ON nt.id = c.nodeTypeId
+  LEFT JOIN Cards_Assets ca ON ca.cardId = c.id
+  LEFT JOIN Assets a ON a.id = ca.assetId
+  LEFT JOIN AssetTypes at ON at.id = a.assetTypeId
+`;
+
+// Set (or clear) the single asset a node-card carries, stored in Cards_Assets.
+// When attaching, also absorb any backing "Images" card link that generation
+// created for the same asset in this project (a card with nodeTypeId IS NULL),
+// pruning it if it becomes empty — so a graph asset ends up associated solely
+// with its node-card, never double-linked. Sibling node-cards that share the
+// asset are left untouched.
+async function setNodeCardAsset(db, cardId, assetId) {
+  await run(db, 'DELETE FROM Cards_Assets WHERE cardId = ?', [cardId]);
+  if (assetId == null) return;
+
+  const owner = await get(db, 'SELECT projectId FROM Cards WHERE id = ?', [cardId]);
+  if (owner) {
+    const backingLinks = await all(
+      db,
+      `SELECT ca.cardId
+       FROM Cards_Assets ca JOIN Cards c ON c.id = ca.cardId
+       WHERE ca.assetId = ? AND c.projectId = ? AND ca.cardId != ? AND c.nodeTypeId IS NULL`,
+      [Number(assetId), owner.projectId, cardId]
+    );
+    if (backingLinks.length > 0) {
+      const affected = [...new Set(backingLinks.map(r => r.cardId))];
+      await run(
+        db,
+        `DELETE FROM Cards_Assets
+         WHERE assetId = ? AND cardId IN (${affected.map(() => '?').join(', ')})`,
+        [Number(assetId), ...affected]
+      );
+      for (const cid of affected) {
+        await normalizeCardAssetPositions(cid);
+      }
+      await deleteCardsIfEmpty(affected);
+    }
+  }
+
+  await run(db, 'INSERT INTO Cards_Assets (cardId, assetId, position) VALUES (?, ?, 0)', [cardId, Number(assetId)]);
+}
+
 async function getProjectNodeById(projectId, nodeId) {
   const normalizedProjectId = await ensureProjectExists(projectId);
   const normalizedNodeId = Number(nodeId);
   const db = await getDb();
   const row = await get(
     db,
-    `SELECT n.*, nt.name AS nodeTypeName,
-            a.id AS assetId, a.name AS assetName, a.filePath AS assetFilePath, a.thumbnail AS assetThumbnail,
-            a.width AS assetWidth, a.height AS assetHeight, a.creationDate AS assetCreationDate,
-            a.parentId AS assetParentId, a.metadata AS assetMetadata,
-            at.name AS assetTypeName
-     FROM Nodes n
-     JOIN NodeTypes nt ON nt.id = n.nodeTypeId
-     LEFT JOIN Assets a ON a.id = n.assetId
-     LEFT JOIN AssetTypes at ON at.id = a.assetTypeId
-     WHERE n.projectId = ? AND n.id = ?`,
+    `${NODE_CARD_SELECT} WHERE c.projectId = ? AND c.id = ? AND c.nodeTypeId IS NOT NULL`,
     [normalizedProjectId, normalizedNodeId]
   );
 
@@ -1813,17 +2046,9 @@ export async function listProjectNodes(projectId) {
   const db = await getDb();
   const rows = await all(
     db,
-    `SELECT n.*, nt.name AS nodeTypeName,
-            a.id AS assetId, a.name AS assetName, a.filePath AS assetFilePath, a.thumbnail AS assetThumbnail,
-            a.width AS assetWidth, a.height AS assetHeight, a.creationDate AS assetCreationDate,
-            a.parentId AS assetParentId, a.metadata AS assetMetadata,
-            at.name AS assetTypeName
-     FROM Nodes n
-     JOIN NodeTypes nt ON nt.id = n.nodeTypeId
-     LEFT JOIN Assets a ON a.id = n.assetId
-     LEFT JOIN AssetTypes at ON at.id = a.assetTypeId
-     WHERE n.projectId = ?
-     ORDER BY n.creationDate ASC, n.id ASC`,
+    `${NODE_CARD_SELECT}
+     WHERE c.projectId = ? AND c.nodeTypeId IS NOT NULL
+     ORDER BY c.creationDate ASC, c.id ASC`,
     [normalizedProjectId]
   );
 
@@ -1853,23 +2078,27 @@ export async function createProjectNode({
   }
 
   const db = await getDb();
+  // A node-card: nodeTypeId + coordinates, no kanban column/position.
   const result = await run(
     db,
-    `INSERT INTO Nodes (projectId, nodeTypeId, name, xPos, yPos, assetId, creationDate, status, progress, metadata)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO Cards (projectId, kanbanColumnId, nodeTypeId, name, position, xPos, yPos, creationDate, status, progress, metadata)
+     VALUES (?, NULL, ?, ?, NULL, ?, ?, ?, ?, ?, ?)`,
     [
       normalizedProjectId,
       resolvedNodeTypeId,
       String(name || '').trim() || null,
       Number(xPos) || 0,
       Number(yPos) || 0,
-      assetId ? Number(assetId) : null,
       createdAt,
       status || null,
       progress ?? null,
       JSON.stringify(metadata || {})
     ]
   );
+
+  if (assetId) {
+    await setNodeCardAsset(db, result.lastID, Number(assetId));
+  }
 
   return await getProjectNodeById(normalizedProjectId, result.lastID);
 }
@@ -1881,7 +2110,7 @@ export async function updateProjectNodePosition(projectId, nodeId, { xPos = 0, y
 
   await run(
     db,
-    'UPDATE Nodes SET xPos = ?, yPos = ? WHERE id = ? AND projectId = ?',
+    'UPDATE Cards SET xPos = ?, yPos = ? WHERE id = ? AND projectId = ?',
     [Number(xPos) || 0, Number(yPos) || 0, node.id, normalizedProjectId]
   );
 
@@ -1907,12 +2136,11 @@ export async function updateProjectNode(projectId, nodeId, updates = {}) {
 
   await run(
     db,
-    `UPDATE Nodes
-     SET name = ?, assetId = ?, status = ?, progress = ?, metadata = ?
+    `UPDATE Cards
+     SET name = ?, status = ?, progress = ?, metadata = ?
      WHERE id = ? AND projectId = ?`,
     [
       updates.name ?? existingNode.name ?? null,
-      updates.assetId === undefined ? (existingNode.assetId ?? null) : (updates.assetId ? Number(updates.assetId) : null),
       updates.status === undefined ? (existingNode.status ?? null) : updates.status,
       updates.progress === undefined ? (existingNode.progress ?? null) : updates.progress,
       JSON.stringify(nextMetadata || {}),
@@ -1920,6 +2148,15 @@ export async function updateProjectNode(projectId, nodeId, updates = {}) {
       normalizedProjectId
     ]
   );
+
+  // The node's asset lives in Cards_Assets. Only touch it when assetId is part
+  // of the update, and only when it actually changed.
+  if (updates.assetId !== undefined) {
+    const nextAssetId = updates.assetId ? Number(updates.assetId) : null;
+    if (nextAssetId !== (existingNode.assetId ?? null)) {
+      await setNodeCardAsset(db, node.id, nextAssetId);
+    }
+  }
 
   return await getProjectNodeById(normalizedProjectId, node.id);
 }
@@ -1929,43 +2166,8 @@ export async function deleteProjectNode(projectId, nodeId) {
   const node = await ensureProjectNode(normalizedProjectId, nodeId);
   const db = await getDb();
 
-  await run(db, 'DELETE FROM Nodes WHERE id = ? AND projectId = ?', [node.id, normalizedProjectId]);
-
-  if (node.assetId) {
-    const nodeStillUsesAsset = await get(
-      db,
-      'SELECT id FROM Nodes WHERE projectId = ? AND assetId = ? LIMIT 1',
-      [normalizedProjectId, node.assetId]
-    );
-
-    if (!nodeStillUsesAsset) {
-      const projectAssetLinks = await all(
-        db,
-        `SELECT ca.cardId
-         FROM Cards_Assets ca
-         JOIN Cards c ON c.id = ca.cardId
-         WHERE ca.assetId = ? AND c.projectId = ?`,
-        [node.assetId, normalizedProjectId]
-      );
-
-      if (projectAssetLinks.length > 0) {
-        await run(
-          db,
-          `DELETE FROM Cards_Assets
-           WHERE assetId = ?
-             AND cardId IN (SELECT id FROM Cards WHERE projectId = ?)`,
-          [node.assetId, normalizedProjectId]
-        );
-
-        const affectedCardIds = [...new Set(projectAssetLinks.map(link => link.cardId))];
-        for (const cardId of affectedCardIds) {
-          await normalizeCardAssetPositions(cardId);
-        }
-
-        await deleteCardsIfEmpty(affectedCardIds);
-      }
-    }
-  }
+  // Deleting the card cascades its Cards_Assets link and any Connections.
+  await run(db, 'DELETE FROM Cards WHERE id = ? AND projectId = ? AND nodeTypeId IS NOT NULL', [node.id, normalizedProjectId]);
 
   return { status: 'deleted' };
 }
@@ -1975,12 +2177,12 @@ export async function listProjectConnections(projectId) {
   const db = await getDb();
   const rows = await all(
     db,
-    `SELECT c.sourceNodeId, c.targetNodeId, c.inputId, c.outputId
-     FROM Connections c
-     JOIN Nodes sourceNode ON sourceNode.id = c.sourceNodeId
-     JOIN Nodes targetNode ON targetNode.id = c.targetNodeId
-     WHERE sourceNode.projectId = ? AND targetNode.projectId = ?
-     ORDER BY c.sourceNodeId ASC, c.targetNodeId ASC, c.inputId ASC, c.outputId ASC`,
+    `SELECT cn.sourceCardId AS sourceNodeId, cn.targetCardId AS targetNodeId, cn.inputId, cn.outputId
+     FROM Connections cn
+     JOIN Cards sourceCard ON sourceCard.id = cn.sourceCardId
+     JOIN Cards targetCard ON targetCard.id = cn.targetCardId
+     WHERE sourceCard.projectId = ? AND targetCard.projectId = ?
+     ORDER BY cn.sourceCardId ASC, cn.targetCardId ASC, cn.inputId ASC, cn.outputId ASC`,
     [normalizedProjectId, normalizedProjectId]
   );
 
@@ -2004,9 +2206,9 @@ export async function createProjectConnection(projectId, {
   const db = await getDb();
   await run(
     db,
-    `INSERT INTO Connections (sourceNodeId, targetNodeId, inputId, outputId)
+    `INSERT INTO Connections (sourceCardId, targetCardId, inputId, outputId)
      VALUES (?, ?, ?, ?)
-     ON CONFLICT(sourceNodeId, targetNodeId, inputId, outputId) DO NOTHING`,
+     ON CONFLICT(sourceCardId, targetCardId, inputId, outputId) DO NOTHING`,
     [sourceNode.id, targetNode.id, String(inputId || 'image-input'), String(outputId || 'image-output')]
   );
 
@@ -2029,9 +2231,9 @@ export async function deleteProjectConnection(projectId, {
   const result = await run(
     db,
     `DELETE FROM Connections
-     WHERE sourceNodeId = ? AND targetNodeId = ? AND inputId = ? AND outputId = ?
-       AND sourceNodeId IN (SELECT id FROM Nodes WHERE projectId = ?)
-       AND targetNodeId IN (SELECT id FROM Nodes WHERE projectId = ?)`,
+     WHERE sourceCardId = ? AND targetCardId = ? AND inputId = ? AND outputId = ?
+       AND sourceCardId IN (SELECT id FROM Cards WHERE projectId = ?)
+       AND targetCardId IN (SELECT id FROM Cards WHERE projectId = ?)`,
     [
       Number(sourceNodeId),
       Number(targetNodeId),
@@ -2183,7 +2385,7 @@ export async function listProjectAssets(projectId = null) {
      JOIN AssetTypes at ON at.id = a.assetTypeId
      JOIN Cards_Assets ca ON ca.assetId = a.id
      JOIN Cards c ON c.id = ca.cardId
-     JOIN KanbanColumns kc ON kc.id = c.kanbanColumnId
+     JOIN Columns kc ON kc.id = c.kanbanColumnId
      ${whereClause}
      ORDER BY c.kanbanColumnId ASC, c.position ASC, ca.position ASC, a.creationDate DESC`,
     params
@@ -2447,7 +2649,7 @@ export async function moveCard(projectId, externalCardId, kanbanColumnId, positi
     throw new Error('Card not found');
   }
 
-  const targetColumn = await get(db, 'SELECT id, name FROM KanbanColumns WHERE id = ?', [kanbanColumnId]);
+  const targetColumn = await get(db, 'SELECT id, name FROM Columns WHERE id = ?', [kanbanColumnId]);
   if (!targetColumn) {
     throw new Error('Kanban column not found');
   }
@@ -2803,31 +3005,19 @@ async function findProjectLinkedToVersion(db, versionId, editReference) {
   );
   if (cardAsset) return cardAsset;
 
-  // 3. Graph node directly attached to this version.
-  const nodeAsset = await get(
+  // 3. Any card (kanban card or graph node-card) with this version selected as a
+  //    source, stored as an "edit:<filePath>" reference in its metadata JSON.
+  const cardMetadata = await get(
     db,
-    `SELECT n.projectId, p.name AS projectName
-     FROM Nodes n
-     LEFT JOIN Projects p ON p.id = n.projectId
-     WHERE n.assetId = ?
-     ORDER BY n.creationDate DESC, n.id DESC
-     LIMIT 1`,
-    [versionId]
-  );
-  if (nodeAsset) return nodeAsset;
-
-  // 4. Graph node with this version selected as a source (stored in metadata JSON).
-  const nodeMetadata = await get(
-    db,
-    `SELECT n.projectId, p.name AS projectName
-     FROM Nodes n
-     LEFT JOIN Projects p ON p.id = n.projectId
-     WHERE n.metadata LIKE ? ESCAPE '\\'
-     ORDER BY n.creationDate DESC, n.id DESC
+    `SELECT c.projectId, p.name AS projectName
+     FROM Cards c
+     LEFT JOIN Projects p ON p.id = c.projectId
+     WHERE c.metadata LIKE ? ESCAPE '\\'
+     ORDER BY c.creationDate DESC, c.id DESC
      LIMIT 1`,
     [`%${escapeLikePattern(editReference)}%`]
   );
-  if (nodeMetadata) return nodeMetadata;
+  if (cardMetadata) return cardMetadata;
 
   return null;
 }
@@ -2968,16 +3158,6 @@ export async function deleteLibraryAssetByFilePath(type, filePath, { force = fal
     );
   }
 
-  if (assetIds.length > 0) {
-    await run(
-      db,
-      `UPDATE Nodes
-       SET assetId = NULL
-       WHERE assetId IN (${assetIds.map(() => '?').join(', ')})`,
-      assetIds
-    );
-  }
-
   for (const asset of assets) {
     await run(db, 'DELETE FROM Assets WHERE id = ?', [asset.id]);
   }
@@ -3014,11 +3194,15 @@ async function deleteCardsIfEmpty(cardIds = []) {
 
   const db = await getDb();
   const placeholders = uniqueCardIds.map(() => '?').join(', ');
+  // Only prune empty Kanban cards. Graph node-cards (nodeTypeId IS NOT NULL) are
+  // valid without any asset (e.g. value nodes) and are removed only explicitly
+  // via deleteProjectNode.
   const cardsToDelete = await all(
     db,
     `SELECT id, projectId, kanbanColumnId
      FROM Cards
      WHERE id IN (${placeholders})
+       AND nodeTypeId IS NULL
        AND NOT EXISTS (SELECT 1 FROM Cards_Assets WHERE Cards_Assets.cardId = Cards.id)`,
     uniqueCardIds
   );
@@ -3027,6 +3211,7 @@ async function deleteCardsIfEmpty(cardIds = []) {
     db,
     `DELETE FROM Cards
      WHERE id IN (${placeholders})
+       AND nodeTypeId IS NULL
        AND NOT EXISTS (SELECT 1 FROM Cards_Assets WHERE Cards_Assets.cardId = Cards.id)`,
     uniqueCardIds
   );
@@ -3495,11 +3680,15 @@ export async function buildProjectExport(projectId, { appVersion = '' } = {}) {
   const mode = String(project.preset || '').toLowerCase() === 'graph' ? 'graph' : 'kanban';
   const seedAssetIds = new Set();
 
+  // Graph node-cards (Cards with a nodeTypeId). Each carries its single asset in
+  // Cards_Assets, resolved here into a plain `assetId` for the manifest.
   const nodes = await all(
     db,
-    `SELECT n.*, nt.name AS nodeTypeName
-     FROM Nodes n JOIN NodeTypes nt ON nt.id = n.nodeTypeId
-     WHERE n.projectId = ? ORDER BY n.id ASC`,
+    `SELECT c.id, c.name, c.xPos, c.yPos, c.status, c.progress, c.metadata, nt.name AS nodeTypeName,
+            (SELECT ca.assetId FROM Cards_Assets ca WHERE ca.cardId = c.id ORDER BY ca.position ASC LIMIT 1) AS assetId
+     FROM Cards c JOIN NodeTypes nt ON nt.id = c.nodeTypeId
+     WHERE c.projectId = ? AND c.nodeTypeId IS NOT NULL
+     ORDER BY c.id ASC`,
     [project.id]
   );
   nodes.forEach(node => {
@@ -3513,17 +3702,20 @@ export async function buildProjectExport(projectId, { appVersion = '' } = {}) {
     const placeholders = nodeIds.map(() => '?').join(', ');
     connections = await all(
       db,
-      `SELECT * FROM Connections
-       WHERE sourceNodeId IN (${placeholders}) AND targetNodeId IN (${placeholders})`,
+      `SELECT sourceCardId AS sourceNodeId, targetCardId AS targetNodeId, inputId, outputId
+       FROM Connections
+       WHERE sourceCardId IN (${placeholders}) AND targetCardId IN (${placeholders})`,
       [...nodeIds, ...nodeIds]
     );
   }
 
+  // Kanban / backing cards only (node-cards are exported as `nodes` above).
   const cards = await all(
     db,
     `SELECT c.*, kc.name AS columnName
-     FROM Cards c JOIN KanbanColumns kc ON kc.id = c.kanbanColumnId
-     WHERE c.projectId = ? ORDER BY c.kanbanColumnId ASC, c.position ASC`,
+     FROM Cards c JOIN Columns kc ON kc.id = c.kanbanColumnId
+     WHERE c.projectId = ? AND c.nodeTypeId IS NULL
+     ORDER BY c.kanbanColumnId ASC, c.position ASC`,
     [project.id]
   );
   cards.forEach(card => collectAssetIdsFromValue(parseJson(card.metadata, {}), seedAssetIds));
@@ -3794,7 +3986,6 @@ function stripWorkflowState(value) {
 // Allocate a Projects.id that isn't already taken (ids are Date.now()-based).
 async function allocateProjectId(db) {
   let candidate = Date.now();
-  // eslint-disable-next-line no-await-in-loop
   while (await get(db, 'SELECT 1 FROM Projects WHERE id = ?', [candidate])) {
     candidate += 1;
   }
@@ -3820,7 +4011,6 @@ export async function importProjectExport(manifest, bundleDir, { name } = {}) {
 
   const db = await getDb();
   const proj = manifest.project || {};
-  const mode = manifest.mode === 'graph' ? 'graph' : 'kanban';
   const projectName = String(name || proj.name || 'Imported Project').trim() || 'Imported Project';
 
   await exec(db, 'BEGIN');
@@ -3953,7 +4143,7 @@ export async function importProjectExport(manifest, bundleDir, { name } = {}) {
     // by the Assets page). Present for both presets: graph projects keep backing
     // cards per node asset, so this must run regardless of mode.
     {
-      const columns = await all(db, 'SELECT id, name, position FROM KanbanColumns ORDER BY position ASC');
+      const columns = await all(db, 'SELECT id, name, position FROM Columns ORDER BY position ASC');
       const columnByName = new Map(columns.map(c => [c.name, c.id]));
       const fallbackColumnId = columns.length ? columns[0].id : null;
 
@@ -4011,7 +4201,8 @@ export async function importProjectExport(manifest, bundleDir, { name } = {}) {
       }
     }
 
-    // --- Phase D: recreate graph nodes + connections (empty for kanban). ---
+    // --- Phase D: recreate graph node-cards + connections (empty for kanban).
+    // A node is a Card with a nodeTypeId; its asset lives in Cards_Assets. ---
     {
       const nodeIdMap = new Map();
       for (const node of manifest.nodes || []) {
@@ -4024,22 +4215,27 @@ export async function importProjectExport(manifest, bundleDir, { name } = {}) {
         const nodeProgress = removedProcessing ? null : (node.progress ?? null);
         const result = await run(
           db,
-          `INSERT INTO Nodes (projectId, nodeTypeId, name, xPos, yPos, assetId, creationDate, status, progress, metadata)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          `INSERT INTO Cards (projectId, kanbanColumnId, nodeTypeId, name, position, xPos, yPos, creationDate, status, progress, metadata)
+           VALUES (?, NULL, ?, ?, NULL, ?, ?, ?, ?, ?, ?)`,
           [
             newProjectId,
             nodeTypeId,
             node.name ?? null,
             Number(node.xPos) || 0,
             Number(node.yPos) || 0,
-            assetId,
             Date.now(),
             nodeStatus,
             nodeProgress,
             JSON.stringify(metadata)
           ]
         );
-        nodeIdMap.set(node.refId, result.lastID);
+        const newCardId = result.lastID;
+        nodeIdMap.set(node.refId, newCardId);
+        if (assetId != null) {
+          // Absorb any backing-card link Phase C created for the same asset
+          // (older .3dgp bundles carry both nodes[] and backing cards[]).
+          await setNodeCardAsset(db, newCardId, assetId);
+        }
       }
 
       for (const conn of manifest.connections || []) {
@@ -4048,7 +4244,7 @@ export async function importProjectExport(manifest, bundleDir, { name } = {}) {
         if (sourceId == null || targetId == null) continue;
         await run(
           db,
-          `INSERT INTO Connections (sourceNodeId, targetNodeId, inputId, outputId) VALUES (?, ?, ?, ?)`,
+          `INSERT OR IGNORE INTO Connections (sourceCardId, targetCardId, inputId, outputId) VALUES (?, ?, ?, ?)`,
           [sourceId, targetId, conn.inputId, conn.outputId]
         );
       }

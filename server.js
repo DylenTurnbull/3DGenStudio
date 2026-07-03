@@ -4175,6 +4175,7 @@ app.delete('/api/projects/:id', async (req, res) => {
 // Turn a filesystem-unsafe name into a folder base name (letters, digits,
 // spaces, dot, dash, underscore) so it can name the export folder + .3dgp file.
 function sanitizeProjectExportName(name, fallback = 'project') {
+  // eslint-disable-next-line no-control-regex -- intentionally strips control chars (illegal in filenames)
   const cleaned = String(name || '').trim().replace(/[<>:"/\\|?* -]+/g, '_').replace(/\.+$/, '').trim();
   return cleaned || fallback;
 }
