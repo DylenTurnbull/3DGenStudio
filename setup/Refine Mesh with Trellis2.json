@@ -1,7 +1,7 @@
 {
   "1": {
     "inputs": {
-      "modelname": "visualbruno/TRELLIS.2-4B-FP8",
+      "modelname": "microsoft/TRELLIS.2-4B",
       "backend": "flash_attn",
       "device": "cuda",
       "low_vram": true,

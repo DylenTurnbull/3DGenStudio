@@ -1,0 +1,105 @@
+{
+  "4": {
+    "inputs": {
+      "model_name": "Hunyuan3D-vae-v2-1-fp16.ckpt"
+    },
+    "class_type": "Hy3D21VAELoader",
+    "_meta": {
+      "title": "Hunyuan 3D 2.1 VAE Loader"
+    }
+  },
+  "9": {
+    "inputs": {
+      "box_v": 1.01,
+      "octree_resolution": 384,
+      "num_chunks": 128000,
+      "mc_level": 0,
+      "mc_algo": "dmc",
+      "enable_flash_vdm": true,
+      "force_offload": false,
+      "vae": [
+        "4",
+        0
+      ],
+      "latents": [
+        "38",
+        0
+      ]
+    },
+    "class_type": "Hy3D21VAEDecode",
+    "_meta": {
+      "title": "Hunyuan 3D 2.1 VAE Decoder"
+    }
+  },
+  "11": {
+    "inputs": {
+      "model_file": [
+        "20",
+        0
+      ],
+      "image": ""
+    },
+    "class_type": "Preview3D",
+    "_meta": {
+      "title": "Preview 3D & Animation"
+    }
+  },
+  "19": {
+    "inputs": {
+      "remove_floaters": true,
+      "remove_degenerate_faces": true,
+      "reduce_faces": true,
+      "max_facenum": 2000000,
+      "smooth_normals": false,
+      "trimesh": [
+        "9",
+        0
+      ]
+    },
+    "class_type": "Hy3D21PostprocessMesh",
+    "_meta": {
+      "title": "Hunyuan 3D 2.1 Post Process Trimesh"
+    }
+  },
+  "20": {
+    "inputs": {
+      "filename_prefix": "3DGenStudioHy21",
+      "file_format": "glb",
+      "save_file": true,
+      "trimesh": [
+        "19",
+        0
+      ]
+    },
+    "class_type": "Hy3D21ExportMesh",
+    "_meta": {
+      "title": "Hunyuan 3D 2.1 Export Mesh"
+    }
+  },
+  "38": {
+    "inputs": {
+      "model": "hunyuan3d-dit-v2-1-fp16.ckpt",
+      "steps": 25,
+      "guidance_scale": 7.5,
+      "seed": 12345,
+      "attention_mode": "sdpa",
+      "image": [
+        "40",
+        0
+      ]
+    },
+    "class_type": "Hy3D21MeshGenerator",
+    "_meta": {
+      "title": "Hunyuan 3D 2.1 Mesh Generator"
+    }
+  },
+  "40": {
+    "inputs": {
+      "image": ""
+    },
+    "class_type": "LoadImage",
+    "_meta": {
+      "title": "Load Image"
+    }
+  }
+}
