@@ -23,3 +23,5 @@ Thumbs.db
 
 dev.log
 python-server.log
+
+.claude/
