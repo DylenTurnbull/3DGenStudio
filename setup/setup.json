@@ -671,6 +671,18 @@
 			"Outputs": [
 				{ "Node": "4", "Name": "Save Image", "Type": "Image" }
 			]
-		}			
+		},
+		{
+			"Name": "Gen Mesh Only with Hy20",
+			"File": "setup/Gen Mesh Only with Hy20.json",
+			"Inputs": [
+				{ "Node": "1", "Input": "image",  "Name": "Source Image", "Type": "Image" },
+				{ "Node": "27",  "Input": "max_facenum",  "Name": "Target Face Number",   "Type": "Number" },
+				{ "Node": "5",  "Input": "seed",  "Name": "Seed",   "Type": "Number" }
+			],
+			"Outputs": [
+				{ "Node": "10", "Name": "Save Mesh", "Type": "Mesh" }
+			]
+		}		
 	]
 }
