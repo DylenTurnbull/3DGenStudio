@@ -1,5 +1,5 @@
 /* eslint-disable react-refresh/only-export-components */
-import { createContext, useContext, useState, useEffect, useCallback } from 'react'
+import { createContext, useContext, useState, useEffect, useCallback, useRef } from 'react'
 import { API_BASE } from '../config'
 
 const ProjectContext = createContext(null)
@@ -7,6 +7,61 @@ const ProjectContext = createContext(null)
 export function ProjectProvider({ children }) {
   const [projects, setProjects] = useState([])
   const [loading, setLoading] = useState(true)
+
+  // A single shared SSE connection multiplexes progress for every ComfyUI
+  // prompt. Using one connection for all jobs (instead of one per job) keeps
+  // concurrent workflows from exhausting the browser's ~6 connection-per-origin
+  // limit, which otherwise stalls all other requests (navigation, asset loads).
+  const comfyStreamRef = useRef(null)
+
+  const getComfyStream = useCallback(() => {
+    if (comfyStreamRef.current) {
+      return comfyStreamRef.current
+    }
+
+    const listeners = new Map() // promptId -> Set<handler>
+    const lastTerminal = new Map() // promptId -> terminal payload (for late subscribers)
+    const stream = { listeners, lastTerminal, eventSource: null }
+
+    const dispatch = (payload) => {
+      const promptId = String(payload?.promptId || '')
+      if (!promptId) return
+      if (payload?.done || payload?.status === 'error') {
+        lastTerminal.set(promptId, payload)
+      }
+      const handlers = listeners.get(promptId)
+      if (handlers) {
+        for (const handler of [...handlers]) {
+          handler(payload)
+        }
+      }
+    }
+
+    if (typeof EventSource !== 'undefined') {
+      const eventSource = new EventSource(`${API_BASE}/comfyui/workflows/events`)
+      eventSource.onmessage = (event) => {
+        try {
+          dispatch(JSON.parse(event.data))
+        } catch {
+          // Ignore malformed frames (e.g. heartbeats/comments never reach onmessage).
+        }
+      }
+      // EventSource auto-reconnects on error; the server replays current
+      // snapshots on reconnect, so no manual recovery is needed here.
+      eventSource.onerror = () => {}
+      stream.eventSource = eventSource
+    }
+
+    comfyStreamRef.current = stream
+    return stream
+  }, [])
+
+  useEffect(() => {
+    return () => {
+      comfyStreamRef.current?.eventSource?.close()
+      comfyStreamRef.current = null
+    }
+  }, [])
 
   const fetchProjects = useCallback(async () => {
     try {
@@ -893,18 +948,55 @@ export function ProjectProvider({ children }) {
 
     formData.append('inputValues', JSON.stringify(inputValues))
 
-    const res = await fetch(`${API_BASE}/comfyui/workflows/run`, {
-      method: 'POST',
-      body: formData
-    })
+    // The /run endpoint returns as soon as the prompt is queued (it no longer
+    // blocks for the whole generation). The generated assets arrive on the
+    // multiplexed progress stream as the terminal `done`/`error` event, so we
+    // start listening before the POST resolves to avoid missing it.
+    const promptId = String(workflowData.promptId || '')
+    let stopCompletion = null
+    const completion = (promptId && typeof EventSource !== 'undefined')
+      ? new Promise((resolve, reject) => {
+          stopCompletion = subscribeToComfyWorkflowProgress(promptId, {
+            onMessage: (payload) => {
+              if (payload?.status === 'error') {
+                stopCompletion?.()
+                reject(new Error(payload?.detail || payload?.error || 'ComfyUI workflow failed'))
+              } else if (payload?.done) {
+                stopCompletion?.()
+                const result = payload?.result
+                resolve(Array.isArray(result) ? result : (result ? [result] : []))
+              }
+            },
+            onError: () => {}
+          })
+        })
+      : null
 
-    const data = await res.json()
+    let res
+    try {
+      res = await fetch(`${API_BASE}/comfyui/workflows/run`, {
+        method: 'POST',
+        body: formData
+      })
+    } catch (err) {
+      stopCompletion?.()
+      throw err
+    }
+
+    const data = await res.json().catch(() => ({}))
 
     if (!res.ok) {
+      stopCompletion?.()
       throw new Error(data?.error || 'Failed to execute ComfyUI workflow')
     }
 
-    return data
+    // Fallback for environments without EventSource: the terminal event can't
+    // be delivered, so return whatever the response body carried.
+    if (!completion) {
+      return data
+    }
+
+    return await completion
   }
 
   const getWikiConfig = async () => {
@@ -1002,27 +1094,40 @@ export function ProjectProvider({ children }) {
   }
 
   const subscribeToComfyWorkflowProgress = (promptId, handlers = {}) => {
-    if (!promptId || typeof EventSource === 'undefined') {
+    const key = String(promptId || '')
+    if (!key) {
       return () => {}
     }
 
-    const eventSource = new EventSource(`${API_BASE}/comfyui/workflows/progress/${encodeURIComponent(promptId)}`)
-
-    eventSource.onmessage = (event) => {
+    const stream = getComfyStream()
+    const handler = (payload) => {
       try {
-        const payload = JSON.parse(event.data)
         handlers.onMessage?.(payload)
       } catch (err) {
         handlers.onError?.(err)
       }
     }
 
-    eventSource.onerror = (event) => {
-      handlers.onError?.(event)
+    if (!stream.listeners.has(key)) {
+      stream.listeners.set(key, new Set())
+    }
+    stream.listeners.get(key).add(handler)
+
+    // Deliver any already-seen terminal event so a listener that subscribes
+    // after completion (or right after the run POST resolves) still fires.
+    const cachedTerminal = stream.lastTerminal.get(key)
+    if (cachedTerminal) {
+      Promise.resolve().then(() => handler(cachedTerminal))
     }
 
     return () => {
-      eventSource.close()
+      const set = stream.listeners.get(key)
+      if (set) {
+        set.delete(handler)
+        if (set.size === 0) {
+          stream.listeners.delete(key)
+        }
+      }
     }
   }
 

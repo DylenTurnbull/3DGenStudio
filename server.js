@@ -112,6 +112,10 @@ const IMAGE_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.webp', '.gif', '.bm
 const MESH_EXTENSIONS = new Set(['.glb', '.gltf', '.obj', '.fbx', '.stl', '.ply']);
 const comfyProgressSubscribers = new Map();
 const comfyProgressSnapshots = new Map();
+// Subscribers to the multiplexed progress stream — a single connection that
+// receives progress for every promptId. This keeps a handful of concurrent
+// workflows from exhausting the browser's ~6 connection-per-origin cap.
+const comfyProgressGlobalSubscribers = new Set();
 const TENCENT_MESH_GENERATION_API_ID = 'tencent_meshgeneration';
 const TENCENT_HUNYUAN_ENDPOINT = 'hunyuan.intl.tencentcloudapi.com';
 const TENCENT_HUNYUAN_VERSION = '2023-09-01';
@@ -941,8 +945,14 @@ function publishComfyProgress(promptId, payload) {
 
   comfyProgressSnapshots.set(key, message);
 
+  const serialized = `data: ${JSON.stringify(message)}\n\n`;
+
   for (const response of getComfyProgressSubscribers(key)) {
-    response.write(`data: ${JSON.stringify(message)}\n\n`);
+    response.write(serialized);
+  }
+
+  for (const response of comfyProgressGlobalSubscribers) {
+    response.write(serialized);
   }
 
   if (message.status === 'completed' || message.status === 'error') {
@@ -953,6 +963,32 @@ function publishComfyProgress(promptId, payload) {
       }
     }, 60000);
   }
+}
+
+function subscribeToAllComfyProgress(req, res) {
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache, no-transform');
+  res.setHeader('Connection', 'keep-alive');
+  res.setHeader('X-Accel-Buffering', 'no');
+  res.flushHeaders?.();
+  res.write('retry: 1000\n\n');
+
+  comfyProgressGlobalSubscribers.add(res);
+
+  // Replay the latest snapshot for every in-flight prompt so a freshly opened
+  // (or reconnected) stream immediately catches up on current state.
+  for (const snapshot of comfyProgressSnapshots.values()) {
+    res.write(`data: ${JSON.stringify(snapshot)}\n\n`);
+  }
+
+  const heartbeat = setInterval(() => {
+    res.write(': keep-alive\n\n');
+  }, 15000);
+
+  req.on('close', () => {
+    clearInterval(heartbeat);
+    comfyProgressGlobalSubscribers.delete(res);
+  });
 }
 
 function subscribeToComfyProgress(promptId, req, res) {
@@ -2956,6 +2992,13 @@ app.get('/api/comfyui/workflows/progress/:promptId', (req, res) => {
   subscribeToComfyProgress(req.params.promptId, req, res);
 });
 
+// Multiplexed progress stream: a single SSE connection carrying progress for
+// every promptId. The client uses this instead of one connection per job so
+// running many workflows at once doesn't saturate the browser connection pool.
+app.get('/api/comfyui/workflows/events', (req, res) => {
+  subscribeToAllComfyProgress(req, res);
+});
+
 app.post('/api/comfyui/workflows/run', workflowExecutionUpload.any(), async (req, res) => {
   let executionMonitor = null;
   let processingCardId = null;
@@ -2965,6 +3008,8 @@ app.post('/api/comfyui/workflows/run', workflowExecutionUpload.any(), async (req
   let processingWorkflowId = null;
   let processingWorkflowName = null;
   let executionPromptId = null;
+  let responded = false;
+  let backgroundStarted = false;
 
   try {
     const { projectId, workflowId, cardId, name, parentAssetId } = req.body;
@@ -3106,8 +3151,26 @@ app.post('/api/comfyui/workflows/run', workflowExecutionUpload.any(), async (req
       clientId: executionClientId,
       promptId: executionPromptId
     });
-    await executionMonitor.completion;
-    const historyRecord = await waitForComfyHistory(baseUrl, queuedPromptId);
+
+    // Respond immediately once the prompt is queued so the browser connection
+    // isn't held open for the entire (possibly multi-minute) generation. The
+    // outputs and terminal status are delivered over the multiplexed progress
+    // stream instead of this request's response body.
+    responded = true;
+    backgroundStarted = true;
+    res.status(202).json({
+      promptId: executionPromptId,
+      clientId: executionClientId,
+      status: 'queued'
+    });
+
+    // Finalize the run in the background: wait for ComfyUI to finish, download
+    // and persist the outputs, then publish the terminal event carrying the
+    // generated assets to the client.
+    (async () => {
+      try {
+        await executionMonitor.completion;
+        const historyRecord = await waitForComfyHistory(baseUrl, queuedPromptId);
     const workflowFiles = getComfyHistoryFiles(historyRecord, workflow.outputs);
     const workflowTexts = getComfyHistoryTexts(historyRecord, workflow.outputs);
 
@@ -3221,13 +3284,53 @@ app.post('/api/comfyui/workflows/run', workflowExecutionUpload.any(), async (req
       });
     }
 
-    if (persistProcessingCard) {
-      await clearCardProcessingState(processingProjectId, processingCardId, {
-        name: processingCardName
-      });
-    }
+        if (persistProcessingCard) {
+          await clearCardProcessingState(processingProjectId, processingCardId, {
+            name: processingCardName
+          });
+        }
 
-    res.status(201).json(generatedAssets);
+        // Terminal event: `done` + `result` signal the client that the run has
+        // fully completed and carry the generated assets it used to receive in
+        // the (now non-blocking) POST response body.
+        publishComfyProgress(executionPromptId, {
+          status: 'completed',
+          progressPercent: 100,
+          detail: 'ComfyUI workflow completed',
+          currentNodeLabel: 'ComfyUI workflow completed',
+          done: true,
+          result: generatedAssets
+        });
+      } catch (finalizeErr) {
+        console.error('ComfyUI workflow finalization failed:', finalizeErr);
+        if (processingProjectId && processingCardId) {
+          await updateCardProcessingSnapshot(processingProjectId, processingCardId, {
+            columnName: 'Images',
+            name: processingCardName,
+            status: 'error',
+            progressPercent: null,
+            detail: finalizeErr.message || 'Failed to execute ComfyUI workflow',
+            currentNodeLabel: 'ComfyUI execution failed',
+            promptId: executionPromptId,
+            source: 'ComfyUI',
+            operationType: 'workflow',
+            workflowId: processingWorkflowId,
+            workflowName: processingWorkflowName,
+            startedAt: processingStartedAt
+          }).catch(persistErr => {
+            console.warn('Failed to persist ComfyUI workflow error state:', persistErr.message);
+          });
+        }
+        publishComfyProgress(executionPromptId, {
+          status: 'error',
+          detail: finalizeErr.message || 'Failed to execute ComfyUI workflow',
+          currentNodeLabel: 'ComfyUI execution failed',
+          done: true
+        });
+      } finally {
+        executionMonitor?.close();
+      }
+    })();
   } catch (err) {
     console.error('ComfyUI workflow execution failed:', err);
     if (processingProjectId && processingCardId) {
@@ -3253,13 +3356,20 @@ app.post('/api/comfyui/workflows/run', workflowExecutionUpload.any(), async (req
       publishComfyProgress(failedPromptId, {
         status: 'error',
         detail: err.message || 'Failed to execute ComfyUI workflow',
-        currentNodeLabel: 'ComfyUI execution failed'
+        currentNodeLabel: 'ComfyUI execution failed',
+        done: true
       });
     }
 
-    res.status(500).json({ error: err.message || 'Failed to execute ComfyUI workflow' });
+    if (!responded) {
+      res.status(500).json({ error: err.message || 'Failed to execute ComfyUI workflow' });
+    }
   } finally {
-    executionMonitor?.close();
+    // The background finalizer owns the monitor once it has started; only close
+    // here for failures that happen before the response is sent.
+    if (!backgroundStarted) {
+      executionMonitor?.close();
+    }
   }
 });
 
