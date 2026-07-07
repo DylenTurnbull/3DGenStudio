@@ -5,6 +5,10 @@ import Viewer from '../Viewer'
 import {
   DEFAULT_INPUT_ID,
   DEFAULT_OUTPUT_ID,
+  HITEM_FACE_MAX,
+  HITEM_FACE_MIN,
+  HITEM_MODEL_VERSION_OPTIONS,
+  HITEM_REQUEST_TYPE_OPTIONS,
   TENCENT_GENERATION_TYPE_OPTIONS,
   TENCENT_MODEL_VERSION_OPTIONS,
   TENCENT_POLYGON_TYPE_OPTIONS,
@@ -16,6 +20,7 @@ import {
   TRIPO_TEXTURE_QUALITY_OPTIONS,
   buildImageEditorPath,
   buildMeshEditorPath,
+  canFetchHitemMeshResult,
   canFetchTencentMeshResult,
   canFetchTripoMeshResult,
   formatAssetDimensions,
@@ -28,8 +33,10 @@ import {
   getWorkflowFileInputAccept,
   getWorkflowFileInputIcon,
   getWorkflowParameterBinding,
+  getHitemResolutionOptions,
   getWorkflowParameterValueType,
   isFileWorkflowValueType,
+  isHitemMeshGenerationApi,
   isTencentMeshGenerationApi,
   isTripoMeshGenerationApi,
   resolveImageSourceOption,
@@ -82,11 +89,13 @@ const GraphAssetNode = memo(function GraphAssetNode({ data }) {
   const selectedApiImageSource = resolveImageSourceOption(draft?.selectedInputSource, inputSources, data.libraryImageOptions)
   const isTencentMeshApi = isMeshGen && isTencentMeshGenerationApi(draft?.selectedApi)
   const isTripoMeshApi = isMeshGen && isTripoMeshGenerationApi(draft?.selectedApi)
+  const isHitemMeshApi = isMeshGen && isHitemMeshGenerationApi(draft?.selectedApi)
   const isTripoP1Model = isTripoMeshApi && (draft?.modelVersion || 'v2.5-20250123') === 'P1-20260311'
+  const hitemResolutionOptions = getHitemResolutionOptions(draft?.hitemModel || 'hitem3dv2.1')
   const hasDraftPrompt = Boolean(String(draft?.prompt || '').trim())
   const hasDraftInputSource = Boolean(String(draft?.selectedInputSource || '').trim())
   const canFetchAsyncResult = isMeshGen
-    && (canFetchTencentMeshResult(data.metadata, data.status) || canFetchTripoMeshResult(data.metadata, data.status))
+    && (canFetchTencentMeshResult(data.metadata, data.status) || canFetchTripoMeshResult(data.metadata, data.status) || canFetchHitemMeshResult(data.metadata, data.status))
   const nodeDisplayName = data.name || data.asset?.name || sourceLabel
   const meshEditorPath = isMeshGen && data.asset?.id
     ? buildMeshEditorPath({
@@ -652,12 +661,15 @@ const GraphAssetNode = memo(function GraphAssetNode({ data }) {
                       <option key={api.id} value={api.id}>{api.name}</option>
                     ))}
                   </select>
-                  <textarea
-                    className="gen-prompt-input nodrag"
-                    placeholder="Describe the mesh to generate"
-                    value={draft.prompt || ''}
-                    onChange={event => data.onDraftFieldChange?.(data.id, 'prompt', event.target.value)}
-                  />
+                  {/* Hitem3D is image-only and does not take a prompt. */}
+                  {!isHitemMeshApi && (
+                    <textarea
+                      className="gen-prompt-input nodrag"
+                      placeholder="Describe the mesh to generate"
+                      value={draft.prompt || ''}
+                      onChange={event => data.onDraftFieldChange?.(data.id, 'prompt', event.target.value)}
+                    />
+                  )}
                   <select
                     className="params-card__select nodrag"
                     value={draft.selectedInputSource || ''}
@@ -911,6 +923,56 @@ const GraphAssetNode = memo(function GraphAssetNode({ data }) {
                       </label>
                     </>
                   )}
+                  {isHitemMeshApi && (
+                    <>
+                      <select
+                        className="params-card__select nodrag"
+                        value={draft.hitemModel || 'hitem3dv2.1'}
+                        onChange={event => data.onDraftFieldChange?.(data.id, 'hitemModel', event.target.value)}
+                      >
+                        {HITEM_MODEL_VERSION_OPTIONS.map(option => (
+                          <option key={option} value={option}>{option}</option>
+                        ))}
+                      </select>
+                      <select
+                        className="params-card__select nodrag"
+                        value={hitemResolutionOptions.includes(draft.hitemResolution) ? draft.hitemResolution : hitemResolutionOptions[0]}
+                        onChange={event => data.onDraftFieldChange?.(data.id, 'hitemResolution', event.target.value)}
+                      >
+                        {hitemResolutionOptions.map(option => (
+                          <option key={option} value={option}>{option}</option>
+                        ))}
+                      </select>
+                      <select
+                        className="params-card__select nodrag"
+                        value={Number(draft.hitemRequestType) || 3}
+                        onChange={event => data.onDraftFieldChange?.(data.id, 'hitemRequestType', Number(event.target.value))}
+                      >
+                        {HITEM_REQUEST_TYPE_OPTIONS.map(option => (
+                          <option key={option.value} value={option.value}>{option.label}</option>
+                        ))}
+                      </select>
+                      <input
+                        type="number"
+                        min={HITEM_FACE_MIN}
+                        max={HITEM_FACE_MAX}
+                        step="10000"
+                        className="params-card__input nodrag"
+                        placeholder="Face count"
+                        value={draft.hitemFace ?? 300000}
+                        onChange={event => data.onDraftFieldChange?.(data.id, 'hitemFace', event.target.value)}
+                      />
+                      <label className="params-card__checkbox-label nodrag">
+                        <div
+                          className={`params-card__checkbox ${draft.hitemPbr ? 'params-card__checkbox--checked' : 'params-card__checkbox--unchecked'}`}
+                          onClick={() => data.onDraftFieldChange?.(data.id, 'hitemPbr', !draft.hitemPbr)}
+                        >
+                          {draft.hitemPbr && <span className="material-symbols-outlined" style={{ fontSize: '10px', color: 'var(--on-tertiary)', fontWeight: 700 }}>check</span>}
+                        </div>
+                        <span>Enable PBR</span>
+                      </label>
+                    </>
+                  )}
                   <div className="graph-node__linked-input font-label">
                     {selectedApiImageSource?.label
                       ? `Input: ${selectedApiImageSource.label}`
@@ -918,7 +980,9 @@ const GraphAssetNode = memo(function GraphAssetNode({ data }) {
                         ? 'Select a connected image input or leave empty to use prompt only'
                         : isTripoMeshApi
                           ? 'Provide either a prompt or an image input connector for Tripo AI'
-                          : 'Select an image source from the graph or asset library'}
+                          : isHitemMeshApi
+                            ? 'Connect an image input or pick one from the asset library for Hitem3D'
+                            : 'Select an image source from the graph or asset library'}
                   </div>
                   <button
                     className="gen-btn nodrag"
@@ -927,6 +991,8 @@ const GraphAssetNode = memo(function GraphAssetNode({ data }) {
                       ? (!draft.name?.trim() || (!hasDraftPrompt && !hasDraftInputSource))
                       : isTripoMeshApi
                         ? (!draft.name?.trim() || (!hasDraftPrompt && !hasDraftInputSource))
+                        : isHitemMeshApi
+                          ? (!draft.name?.trim() || !hasDraftInputSource)
                       : !draft.selectedInputSource}
                   >
                     <span className="material-symbols-outlined">deployed_code</span>

@@ -144,6 +144,11 @@ export function SettingsProvider({ children }) {
           }
         }
       },
+      hitem3d: {
+        accessKey: '',
+        secretKey: '',
+        accessToken: ''
+      },
       comfyui: {
         path: '',
         url: 'http://127.0.0.1',

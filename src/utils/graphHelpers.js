@@ -10,8 +10,10 @@ export const LEGACY_INPUT_ID = 'image-input'
 export const DEFAULT_CUSTOM_API_TYPE = 'image-generation'
 export const TENCENT_MESH_GENERATION_API_ID = 'tencent_meshgeneration'
 export const TRIPO_MESH_GENERATION_API_ID = 'tripo_meshgeneration'
+export const HITEM_MESH_GENERATION_API_ID = 'hitem_meshgeneration'
 export const TENCENT_MESH_API_OPTION = { id: TENCENT_MESH_GENERATION_API_ID, name: 'Tencent Cloud · Hunyuan3D Pro' }
 export const TRIPO_MESH_API_OPTION = { id: TRIPO_MESH_GENERATION_API_ID, name: 'Tripo AI' }
+export const HITEM_MESH_API_OPTION = { id: HITEM_MESH_GENERATION_API_ID, name: 'Hitem3D' }
 export const TENCENT_REGION_OPTIONS = ['ap-singapore', 'eu-frankfurt', 'na-siliconvalley']
 export const TENCENT_MODEL_VERSION_OPTIONS = ['3.0', '3.1']
 export const TENCENT_GENERATION_TYPE_OPTIONS = ['Normal', 'LowPoly', 'Geometry']
@@ -21,6 +23,23 @@ export const TRIPO_TEXTURE_ALIGNMENT_OPTIONS = ['original_image', 'geometry']
 export const TRIPO_TEXTURE_QUALITY_OPTIONS = ['standard', 'detailed']
 export const TRIPO_ORIENTATION_OPTIONS = ['default', 'align_image']
 export const TRIPO_GEOMETRY_QUALITY_OPTIONS = ['standard', 'detailed']
+export const HITEM_MODEL_VERSION_OPTIONS = ['hitem3dv1.5', 'hitem3dv2.0', 'hitem3dv2.1']
+// Resolution enum values are model-dependent (v2.1 differs from v1.5/v2.0).
+export const HITEM_RESOLUTION_OPTIONS_BY_MODEL = {
+  'hitem3dv1.5': ['512', '1024', '1536', '1536pro'],
+  'hitem3dv2.0': ['512', '1024', '1536', '1536pro'],
+  'hitem3dv2.1': ['1536fast', '1536pro']
+}
+export const HITEM_REQUEST_TYPE_OPTIONS = [
+  { value: 1, label: 'Mesh Only' },
+  { value: 3, label: 'Textured Mesh' }
+]
+export const HITEM_FACE_MIN = 100000
+export const HITEM_FACE_MAX = 2000000
+
+export function getHitemResolutionOptions(model) {
+  return HITEM_RESOLUTION_OPTIONS_BY_MODEL[model] || HITEM_RESOLUTION_OPTIONS_BY_MODEL['hitem3dv2.1']
+}
 export const IMAGE_API_LIST = [
   { id: 'nanobana', name: 'Nanobana' },
   { id: 'nanobana_pro', name: 'Nanobana Pro' },
@@ -54,6 +73,10 @@ export function isTripoMeshGenerationApi(selectedApi = '') {
   return String(selectedApi || '') === TRIPO_MESH_GENERATION_API_ID
 }
 
+export function isHitemMeshGenerationApi(selectedApi = '') {
+  return String(selectedApi || '') === HITEM_MESH_GENERATION_API_ID
+}
+
 export function canFetchTencentMeshResult(metadata = {}, status = null) {
   return isTencentMeshGenerationApi(metadata?.selectedApi)
     && status === 'processing'
@@ -66,6 +89,17 @@ export function canFetchTripoMeshResult(metadata = {}, status = null) {
   return isTripoMeshGenerationApi(metadata?.selectedApi)
     && status === 'processing'
     && ['queued', 'running'].includes(String(metadata?.taskStatus || '').toLowerCase())
+    && metadata?.taskId
+}
+
+// Hitem3D reports a range of in-progress states (queueing, processing, running…),
+// so keep the button available for any non-terminal task instead of allowlisting.
+export const HITEM_TERMINAL_STATUSES = ['success', 'failed', 'error', 'fail']
+
+export function canFetchHitemMeshResult(metadata = {}, status = null) {
+  return isHitemMeshGenerationApi(metadata?.selectedApi)
+    && status === 'processing'
+    && !HITEM_TERMINAL_STATUSES.includes(String(metadata?.taskStatus || '').toLowerCase())
     && metadata?.taskId
 }
 

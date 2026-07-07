@@ -168,6 +168,11 @@ export const DEFAULT_SETTINGS = {
         }
       }
     },
+    hitem3d: {
+      accessKey: '',
+      secretKey: '',
+      accessToken: ''
+    },
     comfyui: {
       path: '',
       url: 'http://127.0.0.1',
@@ -2304,7 +2309,10 @@ export async function clearStaleProcessingCards({ preservedSources = [] } = {}) 
 
   for (const row of rows) {
     const metadata = parseJson(row.metadata, {});
-    const source = String(metadata?.processing?.source || '').toLowerCase();
+    // Kanban cards nest the run state under `processing.source`; graph nodes
+    // store it flat as `processingSource`. Check both so async provider jobs
+    // (Tencent / Tripo / Hitem3D) are preserved across a restart on either page.
+    const source = String(metadata?.processing?.source || metadata?.processingSource || '').toLowerCase();
 
     if (preserved.has(source)) {
       continue;

@@ -209,6 +209,56 @@ export default function SettingsModal({ onClose }) {
                       />
                     </div>
                   </div>
+
+                  <div className="settings-api-card">
+                    <div className="settings-api-header">
+                      <div className="settings-api-icon">
+                        <span className="material-symbols-outlined" style={{ fontSize: '18px' }}>view_in_ar</span>
+                      </div>
+                      <span className="settings-api-name">Hitem3D</span>
+                    </div>
+                    <div className="settings-input-group">
+                      <label className="settings-label">Access Key</label>
+                      <input
+                        type="text"
+                        className="settings-input"
+                        placeholder="Enter Hitem3D Access Key"
+                        value={localSettings?.apis?.hitem3d?.accessKey || ''}
+                        onChange={e => setLocalSettings(prev => ({
+                          ...prev,
+                          apis: {
+                            ...prev?.apis,
+                            hitem3d: {
+                              ...prev?.apis?.hitem3d,
+                              accessKey: e.target.value,
+                              // A changed credential invalidates any cached token.
+                              accessToken: ''
+                            }
+                          }
+                        }))}
+                      />
+                    </div>
+                    <div className="settings-input-group">
+                      <label className="settings-label">Secret Key</label>
+                      <input
+                        type="password"
+                        className="settings-input"
+                        placeholder="Enter Hitem3D Secret Key"
+                        value={localSettings?.apis?.hitem3d?.secretKey || ''}
+                        onChange={e => setLocalSettings(prev => ({
+                          ...prev,
+                          apis: {
+                            ...prev?.apis,
+                            hitem3d: {
+                              ...prev?.apis?.hitem3d,
+                              secretKey: e.target.value,
+                              accessToken: ''
+                            }
+                          }
+                        }))}
+                      />
+                    </div>
+                  </div>
                 </div>
               </section>
 

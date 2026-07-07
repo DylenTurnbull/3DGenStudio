@@ -133,6 +133,22 @@ const TRIPO_GEOMETRY_QUALITY_OPTIONS = new Set(['standard', 'detailed']);
 const TRIPO_RUNNING_STATUSES = new Set(['queued', 'running']);
 const TRIPO_SUCCESS_STATUS = 'success';
 const TRIPO_FAILURE_STATUSES = new Set(['failed', 'banned', 'expired', 'cancelled', 'unknown']);
+const HITEM_MESH_GENERATION_API_ID = 'hitem_meshgeneration';
+const HITEM_API_BASE_URL = 'https://api.hitem3d.ai/open-api/v1';
+const HITEM_MODEL_VERSIONS = new Set(['hitem3dv1.5', 'hitem3dv2.0', 'hitem3dv2.1']);
+// Allowed resolution enum values per model (v2.1 differs from v1.5/v2.0).
+const HITEM_RESOLUTIONS_BY_MODEL = {
+  'hitem3dv1.5': new Set(['512', '1024', '1536', '1536pro']),
+  'hitem3dv2.0': new Set(['512', '1024', '1536', '1536pro']),
+  'hitem3dv2.1': new Set(['1536fast', '1536pro'])
+};
+const HITEM_REQUEST_TYPES = new Set([1, 3]); // 1 = Mesh Only, 3 = Textured Mesh
+const HITEM_FACE_MIN = 100000;
+const HITEM_FACE_MAX = 2000000;
+const HITEM_FORMAT_GLB = 2; // GLB output (never surfaced in the UI)
+const HITEM_RUNNING_STATUSES = new Set(['processing', 'queued', 'queueing', 'pending', 'running', 'waiting']);
+const HITEM_SUCCESS_STATUS = 'success';
+const HITEM_FAILURE_STATUSES = new Set(['failed', 'error', 'fail']);
 
 console.log('DEBUG: DATA_DIR is', DATA_DIR);
 console.log('DEBUG: DB_FILE is', path.join(DATA_DIR, 'app.db'));
@@ -647,6 +663,11 @@ const INITIAL_SCHEMA = {
             }
           }
         }
+      },
+      hitem3d: {
+        accessKey: '',
+        secretKey: '',
+        accessToken: ''
       },
       comfyui: {
         path: '',
@@ -1935,6 +1956,295 @@ async function downloadTripoMeshResult(output = {}) {
     filename,
     buffer,
     isPbr: Boolean(pbrModelUrl)
+  };
+}
+
+function isHitemMeshGenerationApi(selectedApi = '') {
+  return String(selectedApi || '').trim() === HITEM_MESH_GENERATION_API_ID;
+}
+
+function getHitem3dConfig(settings = {}) {
+  const providerSettings = settings?.apis?.hitem3d || {};
+
+  return {
+    accessKey: String(providerSettings.accessKey || '').trim(),
+    secretKey: String(providerSettings.secretKey || '').trim(),
+    accessToken: String(providerSettings.accessToken || '').trim()
+  };
+}
+
+// Requests a fresh Hitem3D access token from the Access/Secret key pair and
+// persists it back onto the settings so subsequent calls can reuse it. The
+// docs do not mention an expiry, so we cache it and only re-request on demand
+// (e.g. when a request returns an authentication error).
+async function requestHitem3dAccessToken(providerConfig) {
+  if (!providerConfig.accessKey || !providerConfig.secretKey) {
+    throw new Error('Hitem3D Access Key and Secret Key are required');
+  }
+
+  const authValue = Buffer.from(`${providerConfig.accessKey}:${providerConfig.secretKey}`).toString('base64');
+
+  const response = await fetch(`${HITEM_API_BASE_URL}/auth/token`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Basic ${authValue}`,
+      'Content-Type': 'application/json'
+    }
+  });
+
+  const responseBody = await response.json().catch(() => ({}));
+
+  if (!response.ok || Number(responseBody?.code) !== 200) {
+    throw new Error(responseBody?.msg || responseBody?.message || 'Failed to obtain Hitem3D access token');
+  }
+
+  const accessToken = String(responseBody?.data?.accessToken || '').trim();
+  if (!accessToken) {
+    throw new Error('Hitem3D authentication succeeded but no access token was returned');
+  }
+
+  return accessToken;
+}
+
+// Returns a usable Hitem3D access token, persisting a freshly minted one back
+// onto the settings record. Pass `forceRefresh` to bypass the cached token
+// (used when a downstream request rejects the cached token as unauthorized).
+async function getHitem3dAccessToken(settings, { forceRefresh = false } = {}) {
+  const providerConfig = getHitem3dConfig(settings);
+
+  if (!forceRefresh && providerConfig.accessToken) {
+    return providerConfig.accessToken;
+  }
+
+  const accessToken = await requestHitem3dAccessToken(providerConfig);
+
+  try {
+    const latestSettings = await getSettings();
+    await saveSettings({
+      ...latestSettings,
+      apis: {
+        ...latestSettings?.apis,
+        hitem3d: {
+          ...latestSettings?.apis?.hitem3d,
+          accessToken
+        }
+      }
+    });
+  } catch (persistErr) {
+    console.warn('Failed to persist Hitem3D access token:', persistErr.message);
+  }
+
+  return accessToken;
+}
+
+function isHitemAuthError(response, responseBody) {
+  const code = Number(responseBody?.code);
+  return response?.status === 401 || response?.status === 403 || code === 401 || code === 403;
+}
+
+function normalizeHitemMeshGenerationInput({
+  hasImageSource = false,
+  model,
+  resolution,
+  requestType,
+  face,
+  pbr
+} = {}) {
+  const normalizedModel = HITEM_MODEL_VERSIONS.has(String(model || '').trim())
+    ? String(model || '').trim()
+    : 'hitem3dv2.1';
+
+  const allowedResolutions = HITEM_RESOLUTIONS_BY_MODEL[normalizedModel] || HITEM_RESOLUTIONS_BY_MODEL['hitem3dv2.1'];
+  const requestedResolution = String(resolution || '').trim();
+  const normalizedResolution = allowedResolutions.has(requestedResolution)
+    ? requestedResolution
+    : (normalizedModel === 'hitem3dv2.1' ? '1536pro' : '1024');
+
+  const requestedType = Number(requestType);
+  const normalizedRequestType = HITEM_REQUEST_TYPES.has(requestedType) ? requestedType : 3;
+
+  const requestedFace = Number(face);
+  const normalizedFace = Number.isFinite(requestedFace)
+    ? Math.max(HITEM_FACE_MIN, Math.min(HITEM_FACE_MAX, Math.round(requestedFace)))
+    : 300000;
+
+  const normalizedPbr = normalizeTripoBoolean(pbr, false) ? 1 : 0;
+
+  if (!hasImageSource) {
+    throw new Error('Hitem3D requires an image input for mesh generation');
+  }
+
+  return {
+    normalizedModel,
+    normalizedResolution,
+    normalizedRequestType,
+    normalizedFace,
+    normalizedPbr
+  };
+}
+
+async function submitHitemMeshGenerationTask(settings, {
+  imageBuffer = null,
+  inputFilePath = '',
+  model,
+  resolution,
+  requestType,
+  face,
+  pbr
+} = {}) {
+  const providerConfig = getHitem3dConfig(settings);
+  if (!providerConfig.accessKey || !providerConfig.secretKey) {
+    throw new Error('Hitem3D Access Key and Secret Key are required');
+  }
+
+  const validatedInput = normalizeHitemMeshGenerationInput({
+    hasImageSource: Boolean(imageBuffer),
+    model,
+    resolution,
+    requestType,
+    face,
+    pbr
+  });
+
+  const extension = path.extname(String(inputFilePath || '')).toLowerCase();
+  const mimeType = extension === '.jpg' || extension === '.jpeg' ? 'image/jpeg' : 'image/png';
+  const uploadFilename = path.basename(inputFilePath || `input${extension || '.png'}`);
+
+  const buildFormData = () => {
+    const formData = new FormData();
+    formData.append('request_type', String(validatedInput.normalizedRequestType));
+    formData.append('model', validatedInput.normalizedModel);
+    formData.append('resolution', validatedInput.normalizedResolution);
+    formData.append('pbr', String(validatedInput.normalizedPbr));
+    formData.append('face', String(validatedInput.normalizedFace));
+    formData.append('format', String(HITEM_FORMAT_GLB));
+    formData.append('images', new Blob([imageBuffer], { type: mimeType }), uploadFilename);
+    return formData;
+  };
+
+  console.log('[Hitem3D][SubmitTask] request payload:', JSON.stringify({
+    model: validatedInput.normalizedModel,
+    resolution: validatedInput.normalizedResolution,
+    request_type: validatedInput.normalizedRequestType,
+    pbr: validatedInput.normalizedPbr,
+    face: validatedInput.normalizedFace,
+    format: HITEM_FORMAT_GLB,
+    filename: uploadFilename
+  }, null, 2));
+
+  const performSubmit = async (accessToken) => {
+    const response = await fetch(`${HITEM_API_BASE_URL}/submit-task`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${accessToken}`
+      },
+      body: buildFormData()
+    });
+    const responseBody = await response.json().catch(() => ({}));
+    return { response, responseBody };
+  };
+
+  let accessToken = await getHitem3dAccessToken(settings);
+  let { response, responseBody } = await performSubmit(accessToken);
+
+  // The cached token may have expired; refresh once and retry on auth errors.
+  if (isHitemAuthError(response, responseBody)) {
+    accessToken = await getHitem3dAccessToken(settings, { forceRefresh: true });
+    ({ response, responseBody } = await performSubmit(accessToken));
+  }
+
+  console.log('[Hitem3D][SubmitTask] raw response:', JSON.stringify(responseBody || {}, null, 2));
+
+  if (!response.ok || Number(responseBody?.code) !== 200) {
+    throw new Error(responseBody?.msg || responseBody?.message || 'Hitem3D task submission failed');
+  }
+
+  const taskId = String(responseBody?.data?.task_id || '').trim();
+  if (!taskId) {
+    console.error('[Hitem3D][SubmitTask] missing task_id in response payload:', JSON.stringify(responseBody || {}, null, 2));
+    throw new Error('Hitem3D task submission succeeded but task_id was missing');
+  }
+
+  return {
+    taskId,
+    validatedInput
+  };
+}
+
+async function queryHitemMeshGenerationTask(settings, { taskId } = {}) {
+  const providerConfig = getHitem3dConfig(settings);
+  if (!providerConfig.accessKey || !providerConfig.secretKey) {
+    throw new Error('Hitem3D Access Key and Secret Key are required');
+  }
+
+  const trimmedTaskId = String(taskId || '').trim();
+
+  console.log('[Hitem3D][QueryTask] request payload:', JSON.stringify({ taskId: trimmedTaskId }, null, 2));
+
+  const performQuery = async (accessToken) => {
+    const response = await fetch(`${HITEM_API_BASE_URL}/query-task?task_id=${encodeURIComponent(trimmedTaskId)}`, {
+      method: 'GET',
+      headers: {
+        Authorization: `Bearer ${accessToken}`
+      }
+    });
+    const responseBody = await response.json().catch(() => ({}));
+    return { response, responseBody };
+  };
+
+  let accessToken = await getHitem3dAccessToken(settings);
+  let { response, responseBody } = await performQuery(accessToken);
+
+  if (isHitemAuthError(response, responseBody)) {
+    accessToken = await getHitem3dAccessToken(settings, { forceRefresh: true });
+    ({ response, responseBody } = await performQuery(accessToken));
+  }
+
+  console.log('[Hitem3D][QueryTask] raw response:', JSON.stringify(responseBody || {}, null, 2));
+
+  if (!response.ok || Number(responseBody?.code) !== 200) {
+    throw new Error(responseBody?.msg || responseBody?.message || 'Failed to query Hitem3D task status');
+  }
+
+  const taskData = responseBody?.data || {};
+  const status = String(taskData.state || '').trim().toLowerCase() || 'unknown';
+
+  const normalizedTaskResult = {
+    taskId: String(taskData.task_id || trimmedTaskId || '').trim(),
+    status,
+    url: String(taskData.url || '').trim(),
+    coverUrl: String(taskData.cover_url || '').trim()
+  };
+
+  console.log('[Hitem3D][QueryTask] parsed result:', JSON.stringify(normalizedTaskResult, null, 2));
+
+  return normalizedTaskResult;
+}
+
+async function downloadHitemMeshResult(taskResult = {}) {
+  const selectedUrl = String(taskResult?.url || '').trim();
+
+  if (!selectedUrl) {
+    throw new Error('Hitem3D task succeeded but no model URL was returned');
+  }
+
+  const response = await fetch(selectedUrl);
+  if (!response.ok) {
+    throw new Error(`Failed to download Hitem3D mesh result (${response.status})`);
+  }
+
+  const contentType = response.headers.get('content-type') || 'application/octet-stream';
+  const buffer = Buffer.from(await response.arrayBuffer());
+  const extension = path.extname(getFilenameFromUrl(selectedUrl, '')).replace('.', '') || getExtensionFromContentType(contentType, 'glb');
+  const filename = getFilenameFromUrl(selectedUrl, `generated_mesh.${extension}`);
+
+  return {
+    url: selectedUrl,
+    contentType,
+    extension,
+    filename,
+    buffer,
+    previewImageUrl: String(taskResult?.coverUrl || '').trim() || null
   };
 }
 
@@ -3400,6 +3710,7 @@ app.post('/api/meshes/generate', async (req, res) => {
     const trimmedPrompt = String(prompt || '').trim();
     const isTencentMeshApi = isTencentMeshGenerationApi(selectedApi);
     const isTripoMeshApi = isTripoMeshGenerationApi(selectedApi);
+    const isHitemMeshApi = isHitemMeshGenerationApi(selectedApi);
     const effectiveImageSource = (isTencentMeshApi || isTripoMeshApi) && trimmedPrompt
       ? ''
       : imageSource;
@@ -3408,11 +3719,15 @@ app.post('/api/meshes/generate', async (req, res) => {
       return res.status(400).json({ error: 'projectId, selectedApi and name are required' });
     }
 
-    if (!isTencentMeshApi && !isTripoMeshApi && !trimmedPrompt) {
+    if (!isTencentMeshApi && !isTripoMeshApi && !isHitemMeshApi && !trimmedPrompt) {
       return res.status(400).json({ error: 'prompt is required for mesh generation' });
     }
 
-    if (!isTencentMeshApi && !isTripoMeshApi && !String(selectedApi).startsWith('custom_')) {
+    if (isHitemMeshApi && !effectiveImageSource) {
+      return res.status(400).json({ error: 'Hitem3D requires an image source for mesh generation' });
+    }
+
+    if (!isTencentMeshApi && !isTripoMeshApi && !isHitemMeshApi && !String(selectedApi).startsWith('custom_')) {
       return res.status(400).json({ error: 'Mesh generation currently supports custom APIs only' });
     }
 
@@ -3627,6 +3942,80 @@ app.post('/api/meshes/generate', async (req, res) => {
       return res.status(202).json({
         status: 'queued',
         provider: 'Tripo AI',
+        selectedApi,
+        taskId: submittedTask.taskId,
+        name: trimmedName,
+        cardId: processingCardId,
+        canFetchResult: true
+      });
+    }
+
+    if (isHitemMeshApi) {
+      const sourceFilePath = resolvedSource ? toAbsoluteStoragePath(resolvedSource.inputFilePath) : null;
+      const sourceBuffer = sourceFilePath ? await fs.readFile(sourceFilePath) : null;
+      const validatedInput = normalizeHitemMeshGenerationInput({
+        hasImageSource: Boolean(sourceBuffer),
+        model: req.body?.hitemModel,
+        resolution: req.body?.hitemResolution,
+        requestType: req.body?.hitemRequestType,
+        face: req.body?.hitemFace,
+        pbr: req.body?.hitemPbr
+      });
+
+      await updateCardProcessingSnapshot(processingProjectId, processingCardId, {
+        columnName: 'Mesh Gen',
+        name: processingCardName,
+        status: 'processing',
+        progressPercent: null,
+        detail: 'Submitting Hitem3D mesh generation task',
+        currentNodeLabel: 'Waiting for Hitem3D task id',
+        source: 'Hitem3D',
+        operationType: 'mesh-generation',
+        startedAt: processingStartedAt,
+        selectedApi,
+        inputSource: effectiveImageSource || null,
+        hitemModel: validatedInput.normalizedModel,
+        hitemResolution: validatedInput.normalizedResolution,
+        hitemRequestType: validatedInput.normalizedRequestType,
+        hitemFace: validatedInput.normalizedFace,
+        hitemPbr: validatedInput.normalizedPbr
+      });
+
+      const submittedTask = await submitHitemMeshGenerationTask(settings, {
+        imageBuffer: sourceBuffer,
+        inputFilePath: resolvedSource?.inputFilePath || resolvedSource?.inputFilename || '',
+        model: validatedInput.normalizedModel,
+        resolution: validatedInput.normalizedResolution,
+        requestType: validatedInput.normalizedRequestType,
+        face: validatedInput.normalizedFace,
+        pbr: validatedInput.normalizedPbr
+      });
+
+      await updateCardProcessingSnapshot(processingProjectId, processingCardId, {
+        columnName: 'Mesh Gen',
+        name: processingCardName,
+        status: 'processing',
+        progressPercent: null,
+        detail: 'Hitem3D task submitted. Use GET RESULT to refresh status.',
+        currentNodeLabel: 'Hitem3D task is queued',
+        source: 'Hitem3D',
+        operationType: 'mesh-generation',
+        startedAt: processingStartedAt,
+        promptId: submittedTask.taskId,
+        selectedApi,
+        taskId: submittedTask.taskId,
+        taskStatus: 'processing',
+        inputSource: effectiveImageSource || null,
+        hitemModel: validatedInput.normalizedModel,
+        hitemResolution: validatedInput.normalizedResolution,
+        hitemRequestType: validatedInput.normalizedRequestType,
+        hitemFace: validatedInput.normalizedFace,
+        hitemPbr: validatedInput.normalizedPbr
+      });
+
+      return res.status(202).json({
+        status: 'queued',
+        provider: 'Hitem3D',
         selectedApi,
         taskId: submittedTask.taskId,
         name: trimmedName,
@@ -3973,6 +4362,111 @@ app.post('/api/meshes/generate/tripo/result', async (req, res) => {
   } catch (err) {
     console.error('Tripo AI mesh generation result query failed:', err);
     return res.status(500).json({ error: err.message || 'Failed to query Tripo AI mesh generation result' });
+  }
+});
+
+app.post('/api/meshes/generate/hitem/result', async (req, res) => {
+  try {
+    const { projectId, taskId, name, prompt = '', cardId = null, selectedApi = HITEM_MESH_GENERATION_API_ID, parentAssetId = null } = req.body;
+    const trimmedName = String(name || '').trim();
+
+    if (!projectId || !taskId || !trimmedName) {
+      return res.status(400).json({ error: 'projectId, taskId and name are required' });
+    }
+
+    const settings = await getSettings();
+    const taskResult = await queryHitemMeshGenerationTask(settings, { taskId });
+
+    if (HITEM_FAILURE_STATUSES.has(taskResult.status)) {
+      if (projectId && cardId) {
+        await updateCardProcessingSnapshot(Number(projectId), cardId, {
+          columnName: 'Mesh Gen',
+          name: trimmedName,
+          status: 'error',
+          progressPercent: null,
+          detail: `Hitem3D task failed with status: ${taskResult.status}`,
+          currentNodeLabel: 'Hitem3D task failed',
+          source: 'Hitem3D',
+          operationType: 'mesh-generation',
+          selectedApi,
+          promptId: String(taskId),
+          taskId: String(taskId),
+          taskStatus: taskResult.status
+        });
+      }
+
+      return res.json({
+        status: 'error',
+        provider: 'Hitem3D',
+        selectedApi,
+        taskId: String(taskId),
+        taskStatus: taskResult.status,
+        error: `Hitem3D task failed with status: ${taskResult.status}`
+      });
+    }
+
+    if (taskResult.status !== HITEM_SUCCESS_STATUS) {
+      // Any non-success, non-failure state is treated as still-processing.
+      if (projectId && cardId) {
+        await updateCardProcessingSnapshot(Number(projectId), cardId, {
+          columnName: 'Mesh Gen',
+          name: trimmedName,
+          status: 'processing',
+          progressPercent: null,
+          detail: `Hitem3D task status: ${taskResult.status}`,
+          currentNodeLabel: 'Hitem3D task is running',
+          source: 'Hitem3D',
+          operationType: 'mesh-generation',
+          selectedApi,
+          promptId: String(taskId),
+          taskId: String(taskId),
+          taskStatus: taskResult.status
+        });
+      }
+
+      return res.json({
+        status: 'processing',
+        provider: 'Hitem3D',
+        selectedApi,
+        taskId: String(taskId),
+        taskStatus: taskResult.status,
+        canFetchResult: true
+      });
+    }
+
+    const downloadedFile = await downloadHitemMeshResult(taskResult);
+    const savedAssets = await saveGeneratedMeshAssets({
+      projectId: Number(projectId),
+      name: trimmedName,
+      cardId,
+      provider: 'Hitem3D',
+      prompt: String(prompt || '').trim(),
+      metadata: {
+        selectedApi,
+        taskId: String(taskId),
+        sourceUrl: downloadedFile.url
+      },
+      downloadedFiles: [downloadedFile],
+      parentAssetId
+    });
+
+    if (cardId) {
+      await clearCardProcessingState(Number(projectId), cardId, {
+        name: trimmedName
+      });
+    }
+
+    return res.json({
+      status: 'completed',
+      provider: 'Hitem3D',
+      selectedApi,
+      taskId: String(taskId),
+      taskStatus: HITEM_SUCCESS_STATUS,
+      assets: savedAssets
+    });
+  } catch (err) {
+    console.error('Hitem3D mesh generation result query failed:', err);
+    return res.status(500).json({ error: err.message || 'Failed to query Hitem3D mesh generation result' });
   }
 });
 
@@ -7050,7 +7544,7 @@ initializeStorage().then(async () => {
 
   try {
     const cleared = await clearStaleProcessingCards({
-      preservedSources: ['Tencent Cloud', 'Tripo AI']
+      preservedSources: ['Tencent Cloud', 'Tripo AI', 'Hitem3D']
     });
     if (cleared > 0) {
       console.log(`🧹 Cleared ${cleared} stale processing card(s) on startup`);

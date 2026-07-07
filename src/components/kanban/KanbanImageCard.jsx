@@ -3,9 +3,11 @@ import MeshGenApiOptions from './MeshGenApiOptions'
 import ComfyTextButton from '../comfy/ComfyTextButton'
 import {
   buildMeshEditorPath,
+  canFetchHitemMeshResult,
   canFetchTencentMeshResult,
   canFetchTripoMeshResult,
   getWorkflowParameterValueType,
+  isHitemMeshGenerationApi,
   isTencentMeshGenerationApi,
   isTripoMeshGenerationApi
 } from '../../utils/kanbanHelpers'
@@ -68,7 +70,7 @@ export default function KanbanImageCard({
 }) {
   const runtimeState = getCardRuntimeState(card)
   const cardLocked = runtimeState?.status === 'processing' || runtimeState?.status === 'queued'
-  const canFetchAsyncResult = canFetchTencentMeshResult(runtimeState) || canFetchTripoMeshResult(runtimeState)
+  const canFetchAsyncResult = canFetchTencentMeshResult(runtimeState) || canFetchTripoMeshResult(runtimeState) || canFetchHitemMeshResult(runtimeState)
   const displaySourceLabel = runtimeState?.source
     ? String(runtimeState.source).toUpperCase()
     : card.sourceLabel
@@ -463,6 +465,8 @@ export default function KanbanImageCard({
                         </select>
                       </div>
 
+                      {/* Hitem3D is image-only and does not take a prompt. */}
+                      {!(isMeshGenCard && isHitemMeshGenerationApi(imageEditDraft.selectedApi)) && (
                       <div className="params-card__field">
                         <label className="params-card__label font-label">{isMeshGenCard && (isTencentMeshGenerationApi(imageEditDraft.selectedApi) || isTripoMeshGenerationApi(imageEditDraft.selectedApi)) ? 'Prompt' : 'Prompt Source'}</label>
                         {isMeshGenCard && (isTencentMeshGenerationApi(imageEditDraft.selectedApi) || isTripoMeshGenerationApi(imageEditDraft.selectedApi)) ? (
@@ -490,8 +494,9 @@ export default function KanbanImageCard({
                           </select>
                         )}
                       </div>
+                      )}
 
-                      {(!isMeshGenCard || (!isTencentMeshGenerationApi(imageEditDraft.selectedApi) && !isTripoMeshGenerationApi(imageEditDraft.selectedApi))) && imageEditDraft.promptSource === 'custom' && (
+                      {(!isMeshGenCard || (!isTencentMeshGenerationApi(imageEditDraft.selectedApi) && !isTripoMeshGenerationApi(imageEditDraft.selectedApi) && !isHitemMeshGenerationApi(imageEditDraft.selectedApi))) && imageEditDraft.promptSource === 'custom' && (
                         <div className="params-card__field">
                           <label className="params-card__label font-label">Custom Prompt</label>
                           <div className="comfy-textfield-wrap">

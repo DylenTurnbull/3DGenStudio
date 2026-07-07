@@ -207,6 +207,22 @@ export function ProjectProvider({ children }) {
     return data
   }
 
+  const queryHitemMeshGenerationResult = async (projectId, queryData) => {
+    const res = await fetch(`${API_BASE}/meshes/generate/hitem/result`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ projectId, ...queryData })
+    })
+
+    const data = await res.json()
+
+    if (!res.ok) {
+      throw new Error(data?.error || 'Failed to query Hitem3D mesh generation result')
+    }
+
+    return data
+  }
+
   const deleteAssetEdit = async ({ filePath }) => {
     const params = new URLSearchParams({ filePath })
     const res = await fetch(`${API_BASE}/assets/library/edits?${params.toString()}`, {
@@ -1180,6 +1196,7 @@ export function ProjectProvider({ children }) {
       runMeshGenerationApi,
       queryTencentMeshGenerationResult,
       queryTripoMeshGenerationResult,
+      queryHitemMeshGenerationResult,
       runMeshEditApi,
       runMeshTexturingApi,
       runImageEditComfy,

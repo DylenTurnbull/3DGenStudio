@@ -1,4 +1,8 @@
 import {
+  HITEM_FACE_MAX,
+  HITEM_FACE_MIN,
+  HITEM_MODEL_VERSION_OPTIONS,
+  HITEM_REQUEST_TYPE_OPTIONS,
   TENCENT_GENERATION_TYPE_OPTIONS,
   TENCENT_MODEL_VERSION_OPTIONS,
   TENCENT_POLYGON_TYPE_OPTIONS,
@@ -8,17 +12,20 @@ import {
   TRIPO_ORIENTATION_OPTIONS,
   TRIPO_TEXTURE_ALIGNMENT_OPTIONS,
   TRIPO_TEXTURE_QUALITY_OPTIONS,
+  getHitemResolutionOptions,
+  isHitemMeshGenerationApi,
   isTencentMeshGenerationApi,
   isTripoMeshGenerationApi
 } from '../../utils/kanbanHelpers'
 
-// Provider-specific mesh generation fields (Tencent Cloud / Tripo AI).
+// Provider-specific mesh generation fields (Tencent Cloud / Tripo AI / Hitem3D).
 // Shared between the per-card action menu and the "Add New Mesh" draft.
 // `draft` holds the current option values; `onChange(field, value)` mutates them.
 export default function MeshGenApiOptions({ draft, onChange }) {
   const selectedApi = draft?.selectedApi
   const isTencent = isTencentMeshGenerationApi(selectedApi)
   const isTripo = isTripoMeshGenerationApi(selectedApi)
+  const isHitem = isHitemMeshGenerationApi(selectedApi)
   const isTripoP1Model = isTripo && (draft?.modelVersion || 'v2.5-20250123') === 'P1-20260311'
 
   if (isTencent) {
@@ -304,6 +311,79 @@ export default function MeshGenApiOptions({ draft, onChange }) {
         )}
 
         <p className="image-card__param-hint">Provide either a prompt or an image source for Tripo AI mesh generation.</p>
+      </>
+    )
+  }
+
+  if (isHitem) {
+    const hitemModel = HITEM_MODEL_VERSION_OPTIONS.includes(draft?.hitemModel) ? draft.hitemModel : 'hitem3dv2.1'
+    const resolutionOptions = getHitemResolutionOptions(hitemModel)
+
+    return (
+      <>
+        <div className="params-card__field">
+          <label className="params-card__label font-label">Model</label>
+          <select
+            className="image-card__attribute-select"
+            value={hitemModel}
+            onChange={event => onChange('hitemModel', event.target.value)}
+          >
+            {HITEM_MODEL_VERSION_OPTIONS.map(option => (
+              <option key={option} value={option}>{option}</option>
+            ))}
+          </select>
+        </div>
+
+        <div className="params-card__field">
+          <label className="params-card__label font-label">Resolution</label>
+          <select
+            className="image-card__attribute-select"
+            value={resolutionOptions.includes(draft?.hitemResolution) ? draft.hitemResolution : resolutionOptions[0]}
+            onChange={event => onChange('hitemResolution', event.target.value)}
+          >
+            {resolutionOptions.map(option => (
+              <option key={option} value={option}>{option}</option>
+            ))}
+          </select>
+        </div>
+
+        <div className="params-card__field">
+          <label className="params-card__label font-label">Generation Type</label>
+          <select
+            className="image-card__attribute-select"
+            value={Number(draft?.hitemRequestType) || 3}
+            onChange={event => onChange('hitemRequestType', Number(event.target.value))}
+          >
+            {HITEM_REQUEST_TYPE_OPTIONS.map(option => (
+              <option key={option.value} value={option.value}>{option.label}</option>
+            ))}
+          </select>
+        </div>
+
+        <div className="params-card__field">
+          <label className="params-card__label font-label">Face Count</label>
+          <input
+            type="number"
+            min={HITEM_FACE_MIN}
+            max={HITEM_FACE_MAX}
+            step="10000"
+            className="params-card__input"
+            value={draft?.hitemFace ?? 300000}
+            onChange={event => onChange('hitemFace', event.target.value)}
+          />
+        </div>
+
+        <div className="params-card__field">
+          <label className="params-card__label font-label">Enable PBR</label>
+          <label className="params-card__checkbox-label">
+            <div className={`params-card__checkbox ${draft?.hitemPbr ? 'params-card__checkbox--checked' : 'params-card__checkbox--unchecked'}`} onClick={() => onChange('hitemPbr', !draft?.hitemPbr)}>
+              {draft?.hitemPbr && <span className="material-symbols-outlined" style={{ fontSize: '10px', color: 'var(--on-tertiary)', fontWeight: 700 }}>check</span>}
+            </div>
+            <span>Generate a PBR-ready mesh</span>
+          </label>
+        </div>
+
+        <p className="image-card__param-hint">Hitem3D generates a mesh from an image source (GLB output).</p>
       </>
     )
   }
