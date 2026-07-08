@@ -116,22 +116,25 @@ export default function AutoRetopoToolsPanel({
 
       <div className="mesh-editor-panel__section">
         <span className="mesh-editor-panel__section-title">Silhouette projection</span>
-        {o.preserve_features && (
-          <span className="mesh-editor-panel__hint">Projection is skipped while Preserve features is on.</span>
+        {o.preserve_features && !o.watertight && (
+          <span className="mesh-editor-panel__hint">Projection is skipped while Preserve features is on (surface mode only).</span>
+        )}
+        {o.preserve_features && o.watertight && (
+          <span className="mesh-editor-panel__hint">Watertight shells are always projected onto the original surface, even with Preserve features on.</span>
         )}
         <ToggleField label="Project to surface" value={o.project}
-          onChange={v => setOption('project', v)} disabled={fieldsDisabled || o.preserve_features}
+          onChange={v => setOption('project', v)} disabled={fieldsDisabled || (o.preserve_features && !o.watertight)}
           hint="Project the remesh back onto the original surface" />
         <NumberField label="Projection iterations" min={0} max={100} step={1}
           value={o.project_iters} onChange={v => setOption('project_iters', v)}
-          disabled={fieldsDisabled || !o.project || o.preserve_features} />
+          disabled={fieldsDisabled || !o.project || (o.preserve_features && !o.watertight)} />
         <RangeField label="Move clamp" min={0} max={10} step={0.1} decimals={1}
           value={o.project_clamp} onChange={v => setOption('project_clamp', v)}
-          disabled={fieldsDisabled || !o.project || o.preserve_features}
+          disabled={fieldsDisabled || !o.project || (o.preserve_features && !o.watertight)}
           hint="Max per-vertex move as a multiple of local edge length" />
         <RangeField label="Relax strength" min={0} max={1} step={0.05} decimals={2}
           value={o.relax_strength} onChange={v => setOption('relax_strength', v)}
-          disabled={fieldsDisabled || !o.project || o.preserve_features}
+          disabled={fieldsDisabled || !o.project || (o.preserve_features && !o.watertight)}
           hint="Tangential relaxation factor per iteration" />
       </div>
 
