@@ -1,7 +1,7 @@
 // Auto Retopo mode left panel. Exposes every autoretopo.RetopoConfig field, runs
 // the retopology via the Python mesh-tools service, and offers Keep/Revert on the
 // result. Presentational: option state + handlers come from MeshEditorPage.
-import { RangeField, NumberField, ToggleField } from './MeshToolField'
+import { RangeField, NumberField, ToggleField, SelectField } from './MeshToolField'
 import MeshToolResult from './MeshToolResult'
 import MeshToolProgress from './MeshToolProgress'
 
@@ -177,6 +177,18 @@ export default function AutoRetopoToolsPanel({
           value={o.relax_strength} onChange={v => setOption('relax_strength', v)}
           disabled={fieldsDisabled || !o.project || (o.preserve_features && !o.watertight)}
           hint="Tangential relaxation factor per iteration" />
+      </div>
+
+      <div className="mesh-editor-panel__section">
+        <span className="mesh-editor-panel__section-title">Compute</span>
+        <SelectField label="Device" value={o.device}
+          onChange={v => setOption('device', v)} disabled={fieldsDisabled}
+          options={[
+            { value: 'auto', label: 'Auto (GPU if NVIDIA)' },
+            { value: 'cpu', label: 'CPU' },
+            { value: 'cuda', label: 'CUDA (NVIDIA GPU)' },
+          ]}
+          hint="Runs the watertight-shell stage (CuPy) and the surface-projection stage (NVIDIA Warp) on NVIDIA GPUs; falls back to CPU when unavailable. Remesh / 'Building clean topology' always runs on the CPU." />
       </div>
 
       <div className="mesh-editor-panel__section">

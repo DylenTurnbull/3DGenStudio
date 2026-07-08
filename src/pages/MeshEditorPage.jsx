@@ -191,6 +191,7 @@ const DEFAULT_AUTO_RETOPO_OPTIONS = {
   project_iters: 10,
   project_clamp: 1.5,
   relax_strength: 0.4,
+  device: 'auto',
   seed: 0,
 }
 

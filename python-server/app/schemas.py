@@ -99,6 +99,13 @@ class AutoRetopoOptions(BaseModel):
     relax_strength: float = Field(default=0.4, ge=0.0, le=1.0,
                                   description="Tangential relaxation factor per iteration.")
 
+    # --- compute backend (shell stage only) ---
+    device: Literal["auto", "cpu", "cuda"] = Field(
+        default="auto",
+        description="Compute backend for the watertight shell stage: 'auto' uses an NVIDIA "
+                    "GPU (via CuPy) when available and falls back to CPU; 'cpu' forces CPU; "
+                    "'cuda' forces GPU. Other stages always run on CPU.")
+
     # --- misc ---
     seed: int = Field(default=0, ge=0, description="RNG seed for reproducibility.")
 
