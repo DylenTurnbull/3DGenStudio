@@ -2121,6 +2121,20 @@ export default function KanbanPage() {
     try {
       setImageEditPendingCardId(card.id)
 
+      // Show immediate feedback in the card while the request is in flight — the
+      // external API can take a few seconds to respond, and each branch below
+      // overwrites this once the job/task id comes back (or the finally block
+      // clears it on error / synchronous completion).
+      setImageEditProgressByCardId(prev => ({
+        ...prev,
+        [card.id]: {
+          status: 'processing',
+          detail: `Submitting ${actionLabel} request…`,
+          currentNodeLabel: 'Waiting for API response',
+          progressPercent: null
+        }
+      }))
+
       if (imageEditDraft.mode === 'api') {
         const prompt = resolveDraftPrompt(card, imageEditDraft)
         const isTencentMeshApi = isMeshGenCard && isTencentMeshGenerationApi(imageEditDraft.selectedApi)
