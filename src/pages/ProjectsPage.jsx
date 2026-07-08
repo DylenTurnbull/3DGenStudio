@@ -24,6 +24,13 @@ const PRESETS = [
 
 const CHANGE_LOG_ENTRIES = [
   {
+    version: 'v1.3.2',
+    date: '2026-07-08',
+    items: [
+			'Added Hitem3D API v1'
+    ],
+  },
+  {
     version: 'v1.3.1',
     date: '2026-07-07',
     items: [

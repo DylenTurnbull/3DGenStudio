@@ -19,6 +19,7 @@
 
 | Date | Description |
 | --- | --- |
+| **2026-07-08** | Added Hitem3D API v1 |
 | **2026-07-07** | Fixed slowness when queuing multiple ComfyUI workflows<br>SetupWizard: Added Gen Mesh with Hy2.0<br>MeshEditor - Projection: Fixed Blend overlap seams with original texture |
 | **2026-07-04** | Projects can be exported/imported<br>DB has been restructured and simplified<br>SetupWizard: Added Sam3.1 Segmentation + Gen Mesh with Hy2.1 |
 | **2026-07-03** | Mesh Editor: Added Optimize mode<br>Setup Wizard: Added Boogu Image and Image Editor<br>Kanban: Added a Name field for Image Generation<br>Image Editor: Can choose a name for saved image<br>OpenAI: Added gpt-image-2 model |
