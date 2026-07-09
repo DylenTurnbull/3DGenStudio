@@ -112,7 +112,15 @@ def _stream_tool(run_callable, fmt: str, label: str) -> StreamingResponse:
     def generate():
         yield _sse({"type": "progress", "stage": "start", "frac": 0.0, "message": f"{label} starting…"})
         while True:
-            item = events.get()
+            try:
+                item = events.get(timeout=15)
+            except queue.Empty:
+                # Long blocking stages (e.g. "Building clean topology") emit no
+                # progress for minutes. Send an SSE comment heartbeat so bytes keep
+                # flowing; otherwise the Node proxy's fetch body timeout (~5 min of
+                # silence) aborts the stream and takes the request down with it.
+                yield ": keepalive\n\n"
+                continue
             if item is None:
                 break
             yield _sse(item)
