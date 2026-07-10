@@ -13,6 +13,13 @@ appId: com.3dgenstudio.app
 productName: 3D Gen Studio
 copyright: Copyright © 2026 3D Gen Studio
 
+# Consistent, predictable output filenames across every platform and target.
+# ${os} = mac | linux | windows, ${arch} = x64 | arm64, ${ext} = the target's
+# file extension. This overrides electron-builder's per-target defaults (which
+# were producing version-less .exe names and an "app_…_amd64.deb"). Windows'
+# two .exe targets get their own names below so they don't collide.
+artifactName: 3DGenStudio-${version}-${os}-${arch}.${ext}
+
 directories:
   output: release
   buildResources: build
@@ -51,11 +58,16 @@ win:
       arch: [x64]
 
 nsis:
+  # Distinct from the portable .exe so the two Windows outputs don't collide.
+  artifactName: 3DGenStudio-Setup-${version}-${arch}.${ext}
   oneClick: false
   perMachine: false
   allowToChangeInstallationDirectory: true
   createDesktopShortcut: true
   createStartMenuShortcut: true
+
+portable:
+  artifactName: 3DGenStudio-Portable-${version}-${arch}.${ext}
 
 mac:
   # TODO: add build/icon.icns for a branded icon (falls back to default now).
